@@ -1,6 +1,9 @@
 #include "display.hpp"
 #include "stock_backend.hpp"
 #include "view.hpp"
+#include "input.hpp"
+#include "preferences.hpp"
+#include "hud_theme.hpp"
 #include <cerrno>
 #include <cstdlib>
 #include <csignal>
@@ -23,8 +26,8 @@ void signal_handler(int sig) { if (sig == SIGUSR1) menu_requested = 1; else stop
 uint32_t tick() { return uint32_t(kestrel_ui::monotonic_us() / 1000); }
 struct Options {
     int width = 1920, height = 1080, port = 2765, fps = 25, seconds = 0;
-    bool demo = false, show_menu = false;
-    std::string assets, framebuffer, screenshot, input;
+    bool demo = false, show_menu = false, stock_keys = false, interactive = false, fps_override = false;
+    std::string assets, framebuffer, screenshot, input, control, config, send_key;
 };
 Options options(int argc, char** argv) {
     Options o;
@@ -34,14 +37,19 @@ Options options(int argc, char** argv) {
         if (arg == "--demo") o.demo = true;
         else if (arg == "--stock") o.demo = false;
         else if (arg == "--show-menu") o.show_menu = true;
+        else if (arg == "--stock-keys") o.stock_keys = true;
+        else if (arg == "--interactive-control") o.interactive = true;
         else if (arg == "--assets") o.assets = value();
         else if (arg == "--fb") o.framebuffer = value();
         else if (arg == "--screenshot") o.screenshot = value();
         else if (arg == "--input") o.input = value();
+        else if (arg == "--control") o.control = value();
+        else if (arg == "--config") o.config = value();
+        else if (arg == "--send-key") o.send_key = value();
         else if (arg == "--port") o.port = std::stoi(value());
         else if (arg == "--width") o.width = std::stoi(value());
         else if (arg == "--height") o.height = std::stoi(value());
-        else if (arg == "--fps") o.fps = std::stoi(value());
+        else if (arg == "--fps") { o.fps = std::stoi(value()); o.fps_override = true; }
         else if (arg == "--seconds") o.seconds = std::stoi(value());
         else if (arg == "--help") {
             std::puts("kestrel-ui --assets DIR [--stock | --demo] [--fb /dev/fb0]\n"
@@ -50,13 +58,22 @@ Options options(int argc, char** argv) {
                       "  --fps N               Maximum UI cadence, 1..60 (default 25)\n"
                       "  --seconds N           Exit after a bounded run; 0 runs until stopped\n"
                       "  --screenshot FILE     Save the final transparent overlay as RGBA PAM\n"
-                      "  --show-menu           Start with the diagnostic menu open\n"
+                      "  --show-menu           Start with the canopy side picker open\n"
                       "  --input /dev/input/eventN  Optional evdev keyboard\n"
-                      "  stdin: m menu, w/s select, a/d tabs, Enter theme, Esc close, q quit\n"
+                      "  --stock-keys          Receive validated menu keys on localhost UDP 6222\n"
+                      "  --control SOCKET      Local UI-control datagram socket (owner-only)\n"
+                      "  --config FILE         Save local UI preferences on OK; no backend settings\n"
+                      "  --control SOCKET --send-key KEY  Send menu/up/down/left/right/enter/back/status\n"
+                      "  --control SOCKET --interactive-control  SSH keyboard controller; Q exits client\n"
+                      "  stdin: Enter/M opens; arrows/WASD choose/navigate/edit; Esc backs/cancels; Q quits UI\n"
                       "  SIGUSR1 toggles menu; SIGINT/SIGTERM restore framebuffer and exit.\n"
                       "  This prototype sends no RF, camera, recording or configuration commands.");
             std::exit(0);
         } else throw std::runtime_error("Unknown argument: " + arg);
+    }
+    if (o.interactive || !o.send_key.empty()) {
+        if (o.control.empty() || (o.interactive && !o.send_key.empty())) throw std::runtime_error("Choose a client mode and --control SOCKET");
+        return o;
     }
     if (o.assets.empty()) throw std::runtime_error("--assets DIR is required (generate with kestrel-ui-assetgen)");
     if (o.width < 640 || o.width > 4096 || o.height < 360 || o.height > 2160 ||
@@ -64,74 +81,6 @@ Options options(int argc, char** argv) {
         throw std::runtime_error("Invalid resolution, cadence, port or duration");
     return o;
 }
-class Input {
-public:
-    explicit Input(const std::string& path) {
-        original_flags_ = fcntl(STDIN_FILENO, F_GETFL);
-        if (original_flags_ >= 0) fcntl(STDIN_FILENO, F_SETFL, original_flags_ | O_NONBLOCK);
-        if (isatty(STDIN_FILENO) && !tcgetattr(STDIN_FILENO, &original_term_)) {
-            termios raw = original_term_;
-            raw.c_lflag &= ~(ICANON | ECHO);
-            raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;
-            term_saved_ = tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0;
-        }
-        if (!path.empty()) {
-            fd_ = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-            if (fd_ < 0) std::fprintf(stderr, "Cannot open input %s: %d\n", path.c_str(), errno);
-        }
-    }
-    ~Input() {
-        if (term_saved_) tcsetattr(STDIN_FILENO, TCSANOW, &original_term_);
-        if (original_flags_ >= 0) fcntl(STDIN_FILENO, F_SETFL, original_flags_);
-        if (fd_ >= 0) close(fd_);
-    }
-    void poll(kestrel_ui::Model& model) {
-        using kestrel_ui::Key;
-        char data[64];
-        const ssize_t n = read(STDIN_FILENO, data, sizeof(data));
-        for (ssize_t i = 0; i < n; ++i) {
-            // Preserve escape-sequence state across fragmented terminal reads.
-            const char c = data[i];
-            if (escape_ == 1 && c == '[') { escape_ = 2; continue; }
-            if (escape_ == 2) {
-                if (c == 'A') model.key(Key::Up);
-                if (c == 'B') model.key(Key::Down);
-                if (c == 'C') model.key(Key::Right);
-                if (c == 'D') model.key(Key::Left);
-                escape_ = 0; continue;
-            }
-            if (escape_ == 1) { model.key(Key::Back); escape_ = 0; }
-            if (c == 27) { escape_ = 1; escape_at_ = kestrel_ui::monotonic_us(); }
-            if (c == 'm' || c == 'M') model.key(Key::Menu);
-            if (c == 'w') model.key(Key::Up);
-            if (c == 's') model.key(Key::Down);
-            if (c == 'a') model.key(Key::Left);
-            if (c == 'd') model.key(Key::Right);
-            if (c == '\n' || c == '\r') model.key(Key::Enter);
-            if (c == 'q') model.key(Key::Quit);
-        }
-        if (escape_ && kestrel_ui::monotonic_us() - escape_at_ > 100000) { model.key(Key::Back); escape_ = 0; }
-        input_event event{};
-        for (int reads = 0; fd_ >= 0 && reads < 32 && read(fd_, &event, sizeof(event)) == sizeof(event); ++reads) {
-            if (event.type != EV_KEY || event.value == 0) continue;
-            switch (event.code) {
-                case KEY_UP: model.key(Key::Up); break;
-                case KEY_DOWN: model.key(Key::Down); break;
-                case KEY_LEFT: model.key(Key::Left); break;
-                case KEY_RIGHT: model.key(Key::Right); break;
-                case KEY_ENTER: model.key(Key::Enter); break;
-                case KEY_ESC: case KEY_BACK: model.key(Key::Back); break;
-                case KEY_M: case KEY_MENU: model.key(Key::Menu); break;
-                case KEY_Q: model.key(Key::Quit); break;
-            }
-        }
-    }
-private:
-    int original_flags_ = -1, fd_ = -1, escape_ = 0;
-    uint64_t escape_at_ = 0;
-    termios original_term_{};
-    bool term_saved_ = false;
-};
 }
 int main(int argc, char** argv) {
     try {
@@ -141,6 +90,8 @@ int main(int argc, char** argv) {
         action.sa_handler = signal_handler;
         sigemptyset(&action.sa_mask);
         for (int s : {SIGINT, SIGTERM, SIGUSR1}) sigaction(s, &action, nullptr);
+        if (!o.send_key.empty()) { std::puts(kestrel_ui::send_control(o.control, o.send_key).c_str()); return 0; }
+        if (o.interactive) return kestrel_ui::interactive_control(o.control, stop);
         // Bind before writing to the framebuffer: a running GlassesUI causes
         // a clean failure rather than two competing UI processes.
         std::unique_ptr<kestrel_ui::StockBackend> backend;
@@ -150,14 +101,24 @@ int main(int argc, char** argv) {
         {
             kestrel_ui::Display display(o.width, o.height, o.framebuffer);
             kestrel_ui::Model model;
-            model.menu_open = o.show_menu;
+            auto preferences = kestrel_ui::load_preferences(o.config);
+            if (o.config.empty() || o.fps_override) preferences.fps = o.fps;
+            model.set_preferences(preferences);
+            std::printf("PREFERENCES theme=%s fps=%d details=%d repeat=%d file=%s\n", hud_theme_at(model.theme).name,
+                        model.fps, model.show_details, model.key_repeat, o.config.empty() ? "session-only" : o.config.c_str());
+            model.display_width = display.width(); model.display_height = display.height();
+            lv_timer_set_period(lv_display_get_refr_timer(display.lv_display()), 1000 / model.fps);
+            int applied_fps = model.fps;
+            if (!o.config.empty()) model.save_preferences = [&](const kestrel_ui::UiPreferences& p) { kestrel_ui::store_preferences(o.config, p); };
+            if (o.show_menu) model.open_menu();
             kestrel_ui::View view(model, display.width(), display.height(), o.assets);
-            Input input(o.input);
+            kestrel_ui::Input input(o.input, o.control, o.stock_keys);
+            model.input_sources = input.sources(); model.control_path = o.control;
             const uint64_t started = kestrel_ui::monotonic_us();
             uint64_t next_tick = started, next_log = started, render_us = 0, ticks = 0;
             uint64_t demo_tick = 0;
             std::printf("KESTREL_UI backend=%s display=%s cadence=%d size=%dx%d\n", o.demo ? "DEMO" : "stock",
-                        o.framebuffer.empty() ? "offscreen" : o.framebuffer.c_str(), o.fps, display.width(), display.height());
+                        o.framebuffer.empty() ? "offscreen" : o.framebuffer.c_str(), model.fps, display.width(), display.height());
             while (!stop && !model.quit) {
                 const uint64_t now = kestrel_ui::monotonic_us();
                 if (o.seconds && now - started >= uint64_t(o.seconds) * 1000000) break;
@@ -183,12 +144,17 @@ int main(int argc, char** argv) {
                         ++model.flight_version;
                     }
                 }
-                input.poll(model);
+                input.poll(model, now);
                 if (menu_requested) { menu_requested = 0; model.key(kestrel_ui::Key::Menu); }
+                if (model.fps != applied_fps) {
+                    applied_fps = model.fps;
+                    lv_timer_set_period(lv_display_get_refr_timer(display.lv_display()), 1000 / applied_fps);
+                    next_tick = now;
+                }
                 if (now >= next_tick) {
                     model.tick(now); view.update(now); lv_timer_handler();
                     render_us += kestrel_ui::monotonic_us() - now; ++ticks;
-                    next_tick = now + 1000000 / o.fps;
+                    next_tick = now + 1000000 / model.fps;
                 }
                 if (now >= next_log) {
                     rusage usage{}; getrusage(RUSAGE_SELF, &usage);

@@ -61,6 +61,7 @@ if [ -d "/proc/$gui" ] && ! grep -q '^State:.*Z' "/proc/$gui/status"; then
 fi
 [ "$(pidof ar_ldy_gnd)" = "$backend" ] && [ "$(pidof daemon_sdio)" = "$radio" ]
 "$directory/kestrel-ui" --stock --fb /dev/fb0 --assets "$directory" --seconds "$seconds" \
+    --stock-keys --control "$directory/control.sock" --config "$directory/ui-settings.conf" \
     --show-menu --screenshot "$directory/overlay.pam" > "$directory/ui.log" 2>&1 &
 ui_pid=$!
 echo "KESTREL_UI_PID=$ui_pid DURATION=$seconds"

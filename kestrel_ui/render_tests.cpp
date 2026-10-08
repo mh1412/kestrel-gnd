@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
                 model.flight_version = frame + 1;
                 model.menu_open = frame % 40 < 20;
                 model.tab = (frame / 20) % 3;
+                model.side = model.tab == 0 ? 1 : 0;
+                model.stage = frame % 40 < 6 ? kestrel_ui::MenuStage::Pick : kestrel_ui::MenuStage::Browse;
                 model.selected = frame % int(model.rows(now).size());
                 model.theme = (frame / 30) % hud_theme_count();
                 model.tick(now); view.update(now);
@@ -37,6 +39,16 @@ int main(int argc, char** argv) {
                 lv_refr_now(display.lv_display());
                 if (view.text_cache_bytes() > 1500 * 1024) throw std::runtime_error("Projected text cache exceeded its frame budget");
             }
+            model.menu_open = true; model.side = 0; model.tab = 1; model.selected = 0;
+            model.stage = kestrel_ui::MenuStage::Browse;
+            model.key(kestrel_ui::Key::Enter);
+            for (int frame = 0; frame < 24; ++frame) {
+                now += 40000; model.telemetry.stamp_us = now; model.flight.stamp_us = now;
+                if (frame % 4 == 0) model.key(kestrel_ui::Key::Down);
+                model.tick(now); view.update(now); lv_tick_inc(40); lv_refr_now(display.lv_display());
+            }
+            model.key(kestrel_ui::Key::Back);
+            model.tick(now); view.update(now); lv_refr_now(display.lv_display());
             if (view.text_rasterizations() < 240) throw std::runtime_error("Test did not exercise changing projected text / eviction");
             const auto warm = view.text_rasterizations();
             for (int i = 0; i < 4; ++i) {

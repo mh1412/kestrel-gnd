@@ -22,8 +22,10 @@ backend adapter.
 - Two-track canopy gauges, source-derived drone/goggle icons, measured rail gaps
   around state labels and an edge-column menu with the original selection-ring
   styling. Source text sizes and themes are shared with the GLES implementation.
-- Runtime text, projected segmented MCS gauge, sliding diagnostic menu, local
-  theme selection, stdin keys, optional evdev keyboard and SIGUSR1 menu toggle.
+- GOGGLE/AIR UNIT picker, unfolding side menus, section/row navigation, editable
+  local UI settings with preview/apply/cancel, contextual help and remembered sections.
+- Stdin/evdev keys, validated stock menu packets on loopback UDP 6222, an
+  owner-only local control socket, SSH keyboard client and SIGUSR1 menu toggle.
 - Nonblocking loopback TCP 2765 server for the stock backend's push connection.
   Bounded frame parsing, checksum validation, reconnect handling and protocol ACKs.
 - Verified status layouts: 201-byte payloads from 17.5.3 and 297-byte payloads
@@ -39,17 +41,22 @@ backend adapter.
 
 This is a **canopy-inspired bring-up frontend, not full OSD feature parity**.
 The monolithic `OSD` class is not linked into this process: its shared geometry,
-themes and link transitions have been extracted first. The diagnostic menu is
-new; the original menu/controller/actions remain to be separated and ported.
+themes and link transitions have been extracted first. The standalone controller
+now follows the original canopy menu flow, but backend-owned actions and all
+original menu rows remain to be ported.
 
 Live aircraft telemetry, Betaflight grid/glyph rendering, arm/disarm wipe animations,
 reactive motion, gallery/playback and DVR controls are not wired up yet.
 Unknown stock notifications/MSP data are counted, not guessed. RF, camera and
 recording changes are not sent; the only outbound stock traffic is a framing ACK
-when requested. Local theme changes are session-only.
+when requested. Theme, detail rows, UI cadence and arrow-repeat preferences are
+saved only to an explicitly supplied `--config` file; the device wrapper uses a
+RAM-staged file and does not change vendor configuration or boot startup.
 
-The receiver currently exposes no `/dev/input` devices. Its physical buttons
-need a board-specific input adapter; evdev support alone does not wire them up.
+The receiver currently exposes no `/dev/input` devices. The stock UI's key
+receiver is loopback UDP 6222. KestrelUI admits only the mapped source-0x40 menu
+keys; hardware GPIO 4-6 were verified as board-ID straps, not buttons. Native
+key-source behavior beyond the mapped subset still requires validation.
 The prototype supports 1.0x HUD scale; panel masks are generated for a specific
 screen resolution, while the font atlas is resolution-independent. Perspective
 and typeface now match the original panel geometry; complete GPU effects,
@@ -64,6 +71,8 @@ labels and gauges. The stock backend leaves those fields unavailable.
 ui/canopy.hpp                 Shared GLES/software geometry and link animation
 ui/projective.hpp             Graphics-free inverse projective A8 sampler
 kestrel_ui/model.*           Graphics-free UI state and initial local menu
+kestrel_ui/input.*           Terminal/evdev/stock keys and local control socket
+kestrel_ui/preferences.*     Validated, atomic local UI-preference storage
 kestrel_ui/stock_protocol.*  Bounded stock GUI framing and telemetry decoder
 kestrel_ui/stock_backend.*   Nonblocking stock GUI server adapter
 kestrel_ui/display.*         Offscreen/fbdev CPU overlay presentation
@@ -117,6 +126,7 @@ checkerboard is a visualization of alpha, not captured live video.
 ```sh
 ctest --test-dir build-ui --output-on-failure
 python3 kestrel_ui/socket_test.py build-ui/kestrel_ui/kestrel-ui ui-assets
+python3 kestrel_ui/control_test.py build-ui/kestrel_ui/kestrel-ui ui-assets
 build-ui/kestrel_ui/kestrel-ui-tests --font ui-assets/canopy-font.kuf
 ```
 
@@ -142,6 +152,10 @@ It exercises changing flight/receiver values, tab/theme/menu motion, LRU evictio
 and reuse of unchanged text. Use the same asset option for the sanitizer build.
 The real-socket test covers port exclusion, ACKs, reconnects, malformed/unknown
 frames, stdin input and expiry without incoming telemetry. It is host-only.
+The control integration test covers picker/section/edit navigation, CRLF,
+stock-key decoding, named IPC keys, apply/cancel, preference reload, active/stale
+socket ownership and interactive pseudo-terminal restoration. Q exits the
+keyboard client without terminating the receiver UI. Both run under ASan/UBSan.
 
 For AddressSanitizer/UBSan:
 
@@ -213,9 +227,29 @@ startup retry, the application fails before touching the framebuffer. A demo
 framebuffer run does not acquire that stock port: use it only after arranging
 exclusive framebuffer ownership. Do not run it over a live GlassesUI writer.
 
-On a manually launched interactive UI, `m` opens/closes the menu, `w/s` selects,
-`a/d` changes tabs, Enter cycles the selected theme, Esc closes and `q` exits.
+On a manually launched interactive UI, Enter/M wakes the side picker. Left/Right
+chooses a wing; Enter unfolds it. In a blade, Left/Right selects sections and
+Up/Down selects rows. Enter edits a local setting, Up/Down previews values,
+Enter applies/saves, and Back/Esc cancels. Back then folds the blade and closes
+the picker. WASD aliases the arrows. Q exits a foreground UI.
 `SIGUSR1` toggles the menu, and SIGINT/SIGTERM exit and restore the saved surface.
+
+The detached device wrapper exposes `control.sock` in its staging directory.
+Operate it using the same executable without loading graphics in client mode:
+
+```sh
+/tmp/kestrel-ui-test/kestrel-ui --control /tmp/kestrel-ui-test/control.sock --send-key status
+/tmp/kestrel-ui-test/kestrel-ui --control /tmp/kestrel-ui-test/control.sock --send-key enter
+```
+
+Or from the host, using the receiver's normal SSH authentication:
+
+```sh
+ssh -t -o HostKeyAlgorithms=+ssh-rsa root@192.168.3.102 \
+  '/tmp/kestrel-ui-test/kestrel-ui --control /tmp/kestrel-ui-test/control.sock --interactive-control'
+```
+
+Q exits this keyboard client only. See [menu/input behavior and device tests](../docs/kestrel-ui-menu-input.md).
 
 For an ongoing device session, use duration `0` instead of `30`. Launch it from
 an attached SSH shell, or detach it with the receiver's `nohup`:

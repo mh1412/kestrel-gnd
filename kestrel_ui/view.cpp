@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <sstream>
 
 namespace kestrel_ui {
 namespace {
@@ -65,9 +66,16 @@ View::View(Model& model, int w, int h, const std::string& assets)
     lv_obj_set_size(status_, w / 2, h / 5);
     lv_obj_remove_flag(status_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(status_, draw_event, LV_EVENT_DRAW_MAIN, this);
+    picker_ = lv_obj_create(screen_);
+    lv_obj_remove_style_all(picker_);
+    lv_obj_set_pos(picker_, 0, h * 58 / 100);
+    lv_obj_set_size(picker_, w, h - h * 58 / 100);
+    lv_obj_remove_flag(picker_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(picker_, draw_event, LV_EVENT_DRAW_MAIN, this);
+    lv_obj_add_flag(picker_, LV_OBJ_FLAG_HIDDEN);
     menu_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(menu_);
-    lv_obj_set_size(menu_, w * 34 / 100, h * 62 / 100);
+    lv_obj_set_size(menu_, w * 34 / 100, h - h * 6 / 100);
     lv_obj_remove_flag(menu_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(menu_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
@@ -78,6 +86,7 @@ void View::draw_event(lv_event_t* e) {
     auto* target = lv_event_get_target(e);
     auto* layer = lv_event_get_layer(e);
     if (target == self->menu_) self->draw_menu(layer);
+    else if (target == self->picker_) self->draw_picker(layer);
     else if (target == self->status_) self->draw_status(layer);
     else self->draw_panel(layer, target == self->panels_[0]);
 }
@@ -108,8 +117,16 @@ void View::track(lv_layer_t* layer, bool left, float start, float end, float y,
     }
 }
 void View::draw_panel(lv_layer_t* layer, bool left) {
-    const auto& v = model_.visual;
-    if (!v.visible) return; // Original IDLE_1: panels arrive with the first RF link.
+    auto v = model_.visual;
+    if (!v.visible && !model_.menu_open) return;
+    if (!v.visible) { v.visible = true; v.rule = v.shade = v.block = 1; v.idle_dim = v.rail_dim = 0.65f; }
+    // The selected instrument yields to its unfolded settings blade. A cached
+    // opacity fold avoids reprojecting every glyph during this animation.
+    if ((left ? 0 : 1) == active_menu_side_) {
+        const float remaining = 1 - menu_progress_;
+        if (remaining <= 0) return;
+        v.idle_dim *= remaining; v.rail_dim *= remaining;
+    }
     const auto& th = hud_theme_at(model_.theme);
     const auto& t = model_.telemetry;
     const auto& bf = model_.flight;
@@ -210,6 +227,7 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
         text_.panel(layer, state, left, state_x, 456 + canopy::kTextState / f.U / 2,
                     canopy::kTextState, !left, left && bf.arm == 1 ? th.accent : th.quiet, idle ? v.mark : content);
     }
+    if (!model_.show_details) return;
     if (left) {
         const std::string mode = bf.have_mode ? std::string("\xee\x80\x80   ") +
             std::string(bf.mode, std::find(bf.mode, bf.mode + sizeof(bf.mode), '\0')) : "\xee\x80\x80   FC TELEMETRY --";
@@ -233,78 +251,133 @@ void View::draw_status(lv_layer_t* layer) {
     text_.canvas(layer, message, (width_ - text_.advance(message) * 20 / canopy::kFontPixels) / 2,
                  height_ * 0.44f, 20, false, th.quiet, 1);
 }
+void View::draw_picker(lv_layer_t* layer) {
+    const auto& th = hud_theme_at(model_.theme);
+    const float alpha = 1 - menu_progress_;
+    for (int side = 0; side < 2; ++side) {
+        const bool selected = side == model_.side;
+        const auto& asset = assets_[side];
+        rect(layer, side ? width_ - width_ * 31 / 100 : 0, asset.y - 3, width_ * 31 / 100,
+             height_ - asset.y, selected ? th.accent : th.quiet, alpha * (selected ? 0.65f : 0.2f), 2);
+        text_.panel(layer, side ? "AIR UNIT" : "GOGGLE", side == 0, 56, 412,
+                    canopy::kTextState, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 1 : 0.6f));
+        text_.panel(layer, selected ? "OK TO OPEN" : "LEFT / RIGHT", side == 0, 56, 439,
+                    canopy::kTextRow, side != 0, th.quiet, alpha * 0.8f);
+    }
+}
 void View::draw_menu(lv_layer_t* layer) {
     const auto& th = hud_theme_at(model_.theme);
     lv_area_t bounds;
     lv_obj_get_coords(menu_, &bounds);
-    const int x = bounds.x1, y = bounds.y1, w = lv_obj_get_width(menu_), h = lv_obj_get_height(menu_);
+    const int x = bounds.x1, y = bounds.y1, w = lv_obj_get_width(menu_), h = height_ * 92 / 100;
     const float u = height_ / 1080.0f;
     const int pad = int(22 * u), row_h = int(50 * u);
-    rect(layer, x, y, w, h, th.ground, 0.94f);
-    text_.canvas(layer, model_.tab == 0 ? "AIR UNIT" : "GOGGLE", pad, pad + 14 * u, 15 * u, false, th.accent, 1, x, y);
+    const float e = menu_progress_ * menu_progress_ * (3 - 2 * menu_progress_);
+    const int folded_y = assets_[active_menu_side_].y;
+    const int backdrop_y = int(folded_y + (y - folded_y) * e);
+    const int backdrop_w = int(width_ * 0.31f + (w - width_ * 0.31f) * e);
+    const int backdrop_h = int((height_ - folded_y) * (1 - e) + h * e);
+    const int backdrop_x = active_menu_side_ ? width_ - backdrop_w : 0;
+    rect(layer, backdrop_x, backdrop_y, backdrop_w, backdrop_h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    rect(layer, backdrop_x, backdrop_y, backdrop_w, std::max(1, int(3 * u)), th.accent, menu_progress_);
+    if (menu_progress_ < 0.5f) return;
+    const float content_alpha = std::clamp((menu_progress_ - 0.5f) * 2, 0.0f, 1.0f);
+    text_.canvas(layer, active_menu_side_ ? "AIR UNIT" : "GOGGLE", pad, pad + 14 * u, 15 * u, false, th.accent, content_alpha, x, y);
     int tab_x = pad;
-    for (int tab = 0; tab < 3; ++tab) {
-        if ((tab == 0) != (model_.tab == 0)) continue;
+    const std::vector<int> tabs = active_menu_side_ ? std::vector<int>{0, 6, 5} : std::vector<int>{1, 3, 2, 4};
+    for (int tab : tabs) {
         const std::string title = Model::tab_name(tab);
         const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
         text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
-                     tab == model_.tab ? th.text : th.quiet, 1, x, y);
+                     tab == model_.tab ? th.text : th.quiet, content_alpha, x, y);
         if (tab == model_.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, 1);
         tab_x += tw + int(26 * u);
     }
     const int list_top = pad + int(78 * u);
     rect(layer, x + pad, y + list_top - int(6 * u), w - 2 * pad, 1, th.quiet, 0.3f);
     const auto rows = model_.rows(now_);
-    for (int i = 0; i < int(rows.size()); ++i) {
-        const int ry = list_top + i * row_h;
+    const bool editing = model_.stage == MenuStage::Edit;
+    const int extra = editing ? int(80 * u) : 0;
+    const int help_y = h - int(150 * u);
+    const int visible = std::max(1, (help_y - list_top - extra - int(12 * u)) / row_h);
+    const int start = std::clamp(model_.selected - visible / 2, 0, std::max(0, int(rows.size()) - visible));
+    int ry = list_top;
+    for (int i = start; i < std::min(int(rows.size()), start + visible); ++i) {
         const bool selected = i == model_.selected;
+        const bool expanded = selected && editing;
+        const int rh = row_h + (expanded ? extra : 0);
         if (selected) {
-            rect(layer, x + pad / 2, y + ry + 2, w - pad, row_h - 4, th.ground, 1);
-            rect(layer, x + pad / 2, y + ry + 2, w - pad, row_h - 4, th.accent, 1, std::max(1, int(3 * u)));
+            rect(layer, x + pad / 2, y + ry + 2, w - pad, rh - 4, th.ground, content_alpha);
+            rect(layer, x + pad / 2, y + ry + 2, w - pad, rh - 4, th.accent, content_alpha, std::max(1, int(3 * u)));
         }
         const float baseline = ry + row_h * 0.5f + 23 * u * 0.36f;
-        text_.canvas(layer, rows[i].name, pad, baseline, 23 * u, false, th.text, selected ? 1 : 0.82f, x, y);
+        text_.canvas(layer, rows[i].name, pad, baseline, 23 * u, false, th.text, content_alpha * (selected ? 1 : 0.82f), x, y);
+        if (expanded) {
+            const int current = model_.option_index(), n = int(rows[i].options.size());
+            for (int delta = -1; delta <= 1; ++delta) {
+                const int choice = (current + delta + n) % n;
+                const float size = (delta == 0 ? 30 : 18) * u;
+                text_.canvas(layer, rows[i].options[choice], w - pad, ry + rh * 0.5f + delta * 34 * u + size * 0.36f,
+                             size, true, delta == 0 ? th.accent : th.quiet, content_alpha * (delta == 0 ? 1 : 0.7f), x, y);
+            }
+            ry += rh; continue;
+        }
         const float available = w - 2 * pad - text_.advance(rows[i].name) * 23 * u / canopy::kFontPixels - 16 * u;
         const float value_width = text_.advance(rows[i].value) * 20 * u / canopy::kFontPixels;
         const float size = value_width > available && available > 0 ? std::max(12 * u, 20 * u * available / value_width) : 20 * u;
         text_.canvas(layer, rows[i].value, w - pad, baseline, size, true,
-                     selected ? th.accent : th.quiet, 1, x, y);
+                     selected ? th.accent : th.quiet, content_alpha, x, y);
+        ry += rh;
     }
-    const int help_y = h - int(110 * u);
     rect(layer, x + pad, y + help_y, w - 2 * pad, 1, th.quiet, 0.35f);
-    text_.canvas(layer, "LEFT / RIGHT  section", pad, help_y + 28 * u, 18 * u, false, th.quiet, 0.8f, x, y);
-    text_.canvas(layer, "UP / DOWN  select     OK  local theme", pad, help_y + 54 * u, 18 * u, false, th.quiet, 0.8f, x, y);
-    text_.canvas(layer, "Stock backend controls not yet enabled", pad, help_y + 80 * u, 18 * u, false, th.quiet, 0.8f, x, y);
+    std::istringstream words(model_.selected_help(now_));
+    std::string word, line; int help_line = 0;
+    auto emit_line = [&]() {
+        text_.canvas(layer, line, pad, help_y + (28 + help_line * 26) * u, 18 * u, false, th.quiet, content_alpha * 0.85f, x, y);
+        ++help_line; line.clear();
+    };
+    while (words >> word && help_line < 3) {
+        const auto candidate = line.empty() ? word : line + " " + word;
+        if (!line.empty() && text_.advance(candidate) * 18 * u / canopy::kFontPixels > w - 2 * pad) emit_line();
+        line = line.empty() ? word : line + " " + word;
+    }
+    if (!line.empty() && help_line < 3) emit_line();
+    text_.canvas(layer, editing ? "OK APPLY   /   BACK CANCEL" : "ARROWS NAVIGATE   /   OK EDIT   /   BACK FOLD", pad,
+                 h - 18 * u, 14 * u, false, th.accent, content_alpha * 0.8f, x, y);
 }
 void View::update(uint64_t now) {
     text_.begin_frame();
     now_ = now;
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
-    const float target = model_.menu_open ? 1 : 0;
+    const bool unfolded = model_.menu_open && model_.stage != MenuStage::Pick;
+    const float target = unfolded ? 1 : 0;
     const float next = menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f);
     const bool moving = next != menu_progress_;
     menu_progress_ = next;
-    const float ease = next * next * (3 - 2 * next);
-    const bool right_side = model_.tab == 0;
+    if (unfolded) active_menu_side_ = model_.side;
+    const bool right_side = active_menu_side_ != 0;
     const int menu_w = lv_obj_get_width(menu_);
-    const int mx = right_side ? width_ - int(menu_w * ease) : int(-menu_w * (1 - ease));
-    if (moving || old_tab_ != model_.tab) lv_obj_set_pos(menu_, mx, height_ * 8 / 100);
+    const int mx = right_side ? width_ - menu_w : 0;
+    if (moving || old_tab_ != model_.tab || model_.menu_version != menu_version_) lv_obj_set_pos(menu_, mx, height_ * 6 / 100);
     hidden(menu_, next <= 0);
+    hidden(picker_, !model_.menu_open || model_.stage != MenuStage::Pick);
     const auto& t = model_.telemetry;
     const auto& flight = model_.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
     if (flight_fresh && flight.have_cell_v) cell_peak_ = std::max(cell_peak_, flight.cell_v);
     const bool fresh = t.fresh(now), valid = t.link_valid(now);
-    const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid;
+    const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details;
     const bool data = !initialized_ || model_.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
         t.connected != presented_.connected || t.mcs != presented_.mcs ||
         t.frequency_raw != presented_.frequency_raw || t.distance_raw != presented_.distance_raw ||
         t.quality_raw != presented_.quality_raw || t.voltage_mv != presented_.voltage_mv ||
         t.cpu_temperature_x100 != presented_.cpu_temperature_x100 || t.rf_temperature_raw != presented_.rf_temperature_raw;
-    const bool menu = old_menu_ != model_.menu_open || old_tab_ != model_.tab || old_selected_ != model_.selected;
-    const bool counters = t.status_frames != presented_.status_frames || t.unknown_frames != presented_.unknown_frames || t.bad_frames != presented_.bad_frames;
-    if (appearance || data || menu || (model_.menu_open && model_.tab == 2 && counters)) lv_obj_invalidate(menu_);
+    const bool menu = old_menu_ != model_.menu_open || old_tab_ != model_.tab || old_selected_ != model_.selected || model_.menu_version != menu_version_;
+    const bool counters = t.status_frames != presented_.status_frames || t.unknown_frames != presented_.unknown_frames ||
+                          t.bad_frames != presented_.bad_frames || model_.rejected_inputs != rejected_inputs_;
+    if (moving || appearance || data || menu || (model_.menu_open && (model_.tab == 2 || model_.tab == 4) && counters)) lv_obj_invalidate(menu_);
+    if (appearance || menu || moving) lv_obj_invalidate(picker_);
     if (appearance || data || model_.visual.animating) for (auto* p : panels_) lv_obj_invalidate(p);
     hidden(status_, valid);
     if (!valid) {
@@ -313,6 +386,8 @@ void View::update(uint64_t now) {
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;
     old_menu_ = model_.menu_open; old_tab_ = model_.tab; old_selected_ = model_.selected;
+    menu_version_ = model_.menu_version; old_details_ = model_.show_details;
+    rejected_inputs_ = model_.rejected_inputs;
     flight_version_ = model_.flight_version; old_flight_fresh_ = flight_fresh;
 }
 } // namespace kestrel_ui

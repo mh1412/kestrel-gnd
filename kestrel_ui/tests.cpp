@@ -2,11 +2,16 @@
 #include "stock_protocol.hpp"
 #include "hud_theme.hpp"
 #include "font_atlas.hpp"
+#include "input.hpp"
+#include "preferences.hpp"
 #include "utils/math_utils.hpp"
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
 #include <sstream>
+#include <fstream>
+#include <cstdlib>
+#include <unistd.h>
 
 namespace {
 void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
@@ -98,13 +103,65 @@ int main(int argc, char** argv) {
         check(std::abs(model.visual.idle_dim - 0.5f) < 0.001, "Original idle dim timing");
         model.tick(2300000);
         check(model.visual.mark == 1 && !model.visual.animating, "Original idle transition settles");
-        model.key(Key::Menu); model.key(Key::Right);
-        check(model.menu_open && model.tab == 1, "Menu navigation");
         model.key(Key::Enter);
-        check(model.theme == 1, "Local theme action");
+        check(model.menu_open && model.stage == MenuStage::Pick, "OK wakes the canopy picker");
+        model.key(Key::Right); check(model.side == 1, "Pick air unit");
+        model.key(Key::Left); model.key(Key::Enter);
+        check(model.stage == MenuStage::Browse && model.tab == 1, "Open the goggle HUD blade");
+        model.key(Key::Enter); model.key(Key::Down);
+        check(model.stage == MenuStage::Edit && model.theme == 1, "Preview local theme in an edit transaction");
+        model.key(Key::Back);
+        check(model.stage == MenuStage::Browse && model.theme == 0, "Back cancels and restores the previous theme");
+        model.key(Key::Enter); model.key(Key::Down); model.key(Key::Enter);
+        check(model.stage == MenuStage::Browse && model.theme == 1, "OK commits the preview");
         for (int i = 0; i < 40; ++i) model.key(Key::Down);
         check(model.selected < int(model.rows(1000000).size()), "Dynamic row bounds");
-        model.key(Key::Back); check(!model.menu_open, "Back closes menu");
+        model.key(Key::Back); check(model.stage == MenuStage::Pick && model.menu_open, "Back folds the blade first");
+        model.key(Key::Back); check(!model.menu_open, "Back then closes the canopy");
+        model.key(Key::Enter); model.key(Key::Enter); model.key(Key::Right);
+        check(model.tab == 3, "Sections stay within their selected side");
+        model.key(Key::Enter); model.key(Key::Down); check(model.fps == 26, "UI cadence preview");
+        model.tab = 2; model.key(Key::Enter);
+        check(model.fps == 25 && model.stage == MenuStage::Browse, "Changing rows during editing cancels; it cannot activate another action");
+        Model failure;
+        failure.save_preferences = [](const UiPreferences&) { throw std::runtime_error("read-only config"); };
+        failure.key(Key::Enter); failure.key(Key::Enter); failure.key(Key::Enter); failure.key(Key::Down); failure.key(Key::Enter);
+        check(failure.theme == 0 && failure.feedback.find("Save failed") != std::string::npos, "Failed persistence rolls back the preview");
+        Key parsed;
+        check(parse_key(" OK\n", parsed) && parsed == Key::Enter && !parse_key("bind", parsed), "Named controls are restricted to UI keys");
+        model.key_repeat = false; const auto keys_before = model.key_count;
+        model.key(Key::Up, true); check(model.key_count == keys_before, "Disabled repeats do not move the menu");
+        model.key_repeat = true; model.key(Key::Menu, true); check(model.key_count == keys_before, "Menu keys never auto-repeat");
+
+        TerminalDecoder terminal;
+        std::vector<Key> keys;
+        const KeySink receive_key = [&](Key key, bool) { keys.push_back(key); };
+        terminal.feed("\x1b", 1, 1000, receive_key);
+        terminal.feed("[", 1, 2000, receive_key);
+        terminal.feed("1;2A", 4, 3000, receive_key);
+        check(keys == std::vector<Key>{Key::Up}, "Fragmented/modifier arrow escape sequence");
+        terminal.feed("\r", 1, 4000, receive_key); terminal.feed("\n", 1, 5000, receive_key);
+        check(keys.size() == 2 && keys.back() == Key::Enter, "CRLF is one OK, not edit plus apply");
+        terminal.feed("\x1b", 1, 6000, receive_key); terminal.expire(160001, receive_key);
+        check(keys.back() == Key::Back, "Standalone escape backs out after a bounded wait");
+        bool repeated;
+        const uint8_t stock_up[] = {0x40, 0, 0}, debug[] = {0x40, 9, 0}, long_ok[] = {0x40, 4, 1};
+        check(stock_key(stock_up, 3, parsed, repeated) && parsed == Key::Up && !repeated, "Validated stock menu-key mapping");
+        check(!stock_key(debug, 3, parsed, repeated) && !stock_key(long_ok, 3, parsed, repeated), "Unmapped/debug/long stock keys are not actions");
+
+        const char* temporary_root = std::getenv("TMPDIR");
+        const std::string settings_pattern = std::string(temporary_root ? temporary_root : "/tmp") + "/kestrel-ui-settings-test-XXXXXX";
+        std::vector<char> settings_directory(settings_pattern.begin(), settings_pattern.end()); settings_directory.push_back('\0');
+        if (!mkdtemp(settings_directory.data())) throw std::runtime_error("Cannot create preferences test directory");
+        const std::string settings_path = std::string(settings_directory.data()) + "/ui.conf";
+        store_preferences(settings_path, {2, 30, false, false});
+        const auto loaded = load_preferences(settings_path);
+        check(loaded.theme == 2 && loaded.fps == 30 && !loaded.details && !loaded.repeat, "Local preferences round trip");
+        { std::ofstream invalid(settings_path); invalid << "UNRELATED_USER_FILE=1\n"; }
+        bool invalid_settings = false;
+        try { load_preferences(settings_path); } catch (const std::runtime_error&) { invalid_settings = true; }
+        check(invalid_settings, "Unrelated configuration is not adopted/overwritten");
+        unlink(settings_path.c_str()); rmdir(settings_directory.data());
         for (float x : {0.0f, 156.0f, 300.0f}) {
             auto l = canopy::project(1920, 1080, true, x, 526);
             auto r = canopy::project(1920, 1080, false, x, 526);
