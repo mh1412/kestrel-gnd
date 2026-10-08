@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -10,6 +11,9 @@ namespace canopy {
 constexpr float kBleed = 60.0f;
 constexpr float kSlantRad = 0.05934f;
 constexpr float kDrop = 12.0f;
+constexpr float kTextBig = 0.185f, kTextUnit = 0.082f, kTextSmall = 0.055f;
+constexpr float kTextRow = 0.058f, kTextLabel = 0.040f, kTextState = 0.125f;
+constexpr int kFontPixels = 40, kTextCellHeight = 64, kTextBaseline = 48;
 constexpr float kIdleBriUs = 240000.0f;
 constexpr float kIdlePulseUs = 360000.0f;
 constexpr float kIdleMarkAt = 440000.0f;
@@ -44,20 +48,45 @@ struct Point { float x, y; };
 
 // Project the same slant/yaw as OSD::draw_canopy_hud on the CPU. Used for
 // host asset baking and dynamic software gauge positions, not video rendering.
-inline Point project(int width, int height, bool left, float x, float y) {
+inline Point project_world(int width, int height, bool left, float x, float y) {
     constexpr float depth = 3.2f;
     const float fh = std::tan(0.785f / 2) * depth;
     const float fw = fh * width / height;
     const auto f = canopy_frame(fw, fh, 0.02f, 1, depth);
     const float px = left ? f.LXo(56) : f.RXo(56), py = f.MY(502);
     const float angle = left ? kSlantRad : -kSlantRad;
-    const float dx = (left ? f.LXo(x) : f.RXo(x)) - px, dy = f.MY(y) - py;
+    const float dx = x - px, dy = y - py;
     const float sx = px + dx * std::cos(angle) - dy * std::sin(angle);
     const float sy = py + dx * std::sin(angle) + dy * std::cos(angle);
     const float yaw = left ? 0.26f : -0.26f;
     const float mag = depth / (depth + sx * std::sin(yaw));
     return {width * (0.5f + sx * std::cos(yaw) * mag / (2 * fw)),
             height * (0.5f - sy * mag / (2 * fh))};
+}
+
+inline CanopyFrame screen_frame(int width, int height) {
+    const float fh = std::tan(0.785f / 2) * 3.2f;
+    return canopy_frame(fh * width / height, fh, 0.02f, 1, 3.2f);
+}
+inline Point project(int width, int height, bool left, float x, float y) {
+    const auto f = screen_frame(width, height);
+    return project_world(width, height, left, left ? f.LXo(x) : f.RXo(x), f.MY(y));
+}
+
+// Source texture corners TL, TR, BR, BL. Model-space x always grows to the
+// right, even on the right wing: mirroring panel coordinates must not mirror
+// the glyphs. Matches OSD::draw_text/draw_icon, including its baseline padding.
+inline std::array<Point, 4> text_quad(int width, int height, bool left, float x,
+                                    float y, float scale, float bitmap_width,
+                                    float advance, bool right_align) {
+    const auto f = screen_frame(width, height);
+    float wx = left ? f.LXo(x) : f.RXo(x);
+    if (right_align) wx -= advance * scale / kTextCellHeight;
+    const float wy = f.MY(y), w = bitmap_width * scale / kTextCellHeight;
+    return {project_world(width, height, left, wx, wy + scale),
+            project_world(width, height, left, wx + w, wy + scale),
+            project_world(width, height, left, wx + w, wy),
+            project_world(width, height, left, wx, wy)};
 }
 
 struct LinkVisual {

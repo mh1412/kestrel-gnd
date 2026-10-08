@@ -10,10 +10,18 @@ backend adapter.
 
 - LVGL **9.2.2** software rendering, one UI thread, no GL/GBM/DRM/FFmpeg dependency.
 - Original canopy ground geometry, slant/perspective projection and color themes.
+- Original **Chakra Petch SemiBold** glyphs, kerning, 40px ink/64px cell/baseline 48,
+  projected through the same 3D panel transforms as the GLES text quads.
+- CPU inverse-homography rasterization with bilinear sampling and cached cropped
+  A8 text masks. Glyphs genuinely foreshorten toward the center; right-hand text
+  remains readable rather than being mirrored with the panel.
 - Original OSD acquired-link sweep and link-loss dim/pulse timing, extracted into
   `ui/canopy.hpp` and also used by the existing GLES implementation.
 - Host-baked cropped A8 panel masks; runtime tinting supports all existing themes
   without separate full-color asset sets. At 1080p both masks total 292,678 bytes.
+- Two-track canopy gauges, source-derived drone/goggle icons, measured rail gaps
+  around state labels and an edge-column menu with the original selection-ring
+  styling. Source text sizes and themes are shared with the GLES implementation.
 - Runtime text, projected segmented MCS gauge, sliding diagnostic menu, local
   theme selection, stdin keys, optional evdev keyboard and SIGUSR1 menu toggle.
 - Nonblocking loopback TCP 2765 server for the stock backend's push connection.
@@ -34,7 +42,7 @@ The monolithic `OSD` class is not linked into this process: its shared geometry,
 themes and link transitions have been extracted first. The diagnostic menu is
 new; the original menu/controller/actions remain to be separated and ported.
 
-Aircraft telemetry, Betaflight grid/glyph rendering, arm/disarm animations,
+Live aircraft telemetry, Betaflight grid/glyph rendering, arm/disarm wipe animations,
 reactive motion, gallery/playback and DVR controls are not wired up yet.
 Unknown stock notifications/MSP data are counted, not guessed. RF, camera and
 recording changes are not sent; the only outbound stock traffic is a framing ACK
@@ -42,19 +50,26 @@ when requested. Local theme changes are session-only.
 
 The receiver currently exposes no `/dev/input` devices. Its physical buttons
 need a board-specific input adapter; evdev support alone does not wire them up.
-The prototype supports 1.0x HUD scale; assets are generated for a specific screen
-resolution. Dynamic text is currently unwarped LVGL text, not exact GLES glyph
-projection. More typography/animation work is needed to match the original look.
+The prototype supports 1.0x HUD scale; panel masks are generated for a specific
+screen resolution, while the font atlas is resolution-independent. Perspective
+and typeface now match the original panel geometry; complete GPU effects,
+reactive HUD motion and all menu/controller features remain to be ported.
+The explicit `--demo` backend supplies synthetic flight readings through the
+original `BfTelem` structure to exercise big figures, unit baselines, arm/timer
+labels and gauges. The stock backend leaves those fields unavailable.
 
 ## Structure
 
 ```text
 ui/canopy.hpp                 Shared GLES/software geometry and link animation
+ui/projective.hpp             Graphics-free inverse projective A8 sampler
 kestrel_ui/model.*           Graphics-free UI state and initial local menu
 kestrel_ui/stock_protocol.*  Bounded stock GUI framing and telemetry decoder
 kestrel_ui/stock_backend.*   Nonblocking stock GUI server adapter
 kestrel_ui/display.*         Offscreen/fbdev CPU overlay presentation
 kestrel_ui/view.*            LVGL canopy view and menu
+kestrel_ui/font_atlas.*      Baked glyph/kerning loader and text composition
+kestrel_ui/perspective_text.* Cached CPU text projection and LVGL presentation
 kestrel_ui/assetgen.cpp      Deterministic host-side panel-mask generator
 ```
 
@@ -69,17 +84,24 @@ Requires CMake, a C/C++17 compiler, Git and network access for the pinned LVGL
 checkout. No graphics/media development packages are required. Supply an
 existing **9.2.2** checkout with `-DKESTREL_LVGL_SOURCE_DIR=/path/to/lvgl` for
 offline builds. Existing `kestrel-gnd` builds remain the default.
+The host font-bake/preview tools require Python 3 and Pillow. Use the same
+`ChakraPetch-SemiBold.ttf` and accompanying `OFL.txt` shipped with fpvOS/the
+fpvOS flasher, or obtain them from the public Chakra Petch/Google Fonts project.
+The font and its license are input assets; they are not bundled into this
+repository or read by a target font engine.
 
 ```sh
 cmake -S . -B build-ui -DKESTREL_UI_ONLY=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-ui -j
 build-ui/kestrel_ui/kestrel-ui-assetgen 1920 1080 ui-assets
+python3 tools/ui_font_bake.py /path/to/ChakraPetch-SemiBold.ttf ui-assets/canopy-font.kuf
 build-ui/kestrel_ui/kestrel-ui --demo --assets ui-assets \
     --show-menu --seconds 5 --screenshot /tmp/kestrel-menu.pam
 ```
 
-The demo deliberately alternates an artificial RF-link state to exercise the
-shared animation. It is offscreen unless `--fb` is explicitly supplied. It is
+The demo deliberately alternates an artificial RF-link state and supplies
+synthetic FC readings to exercise typography/gauges and the shared animation.
+It is offscreen unless `--fb` is explicitly supplied. It is
 not a telemetry recording or a desktop window. View the screenshot on the host
 (the preview helper requires Pillow):
 
@@ -95,6 +117,7 @@ checkerboard is a visualization of alpha, not captured live video.
 ```sh
 ctest --test-dir build-ui --output-on-failure
 python3 kestrel_ui/socket_test.py build-ui/kestrel_ui/kestrel-ui ui-assets
+build-ui/kestrel_ui/kestrel-ui-tests --font ui-assets/canopy-font.kuf
 ```
 
 The C++ suite covers bytewise/coalesced framing, checksum corruption,
@@ -102,6 +125,21 @@ resynchronization, parser bounds, signed/little-endian status fields, both
 verified payload layouts, freshness, link-transition timing and local menus.
 It also checks software projection against the original GLES matrix chain at
 720p and 1080p without requiring a GPU or graphics libraries.
+Projective tests cover asymmetric texture sampling, clipping, mirrored-text
+regressions, folded-quad rejection, inverse/forward consistency and glyph interiors
+against the 3D projection. Font tests cover metrics, kerning, Unicode fallback and
+malformed/truncated atlases.
+
+Register the 240-frame renderer/cache stress test using the generated 1080p assets:
+
+```sh
+cmake -S . -B build-ui -DKESTREL_UI_ONLY=ON -DKESTREL_UI_TEST_ASSETS="$PWD/ui-assets"
+cmake --build build-ui -j
+ctest --test-dir build-ui --output-on-failure
+```
+
+It exercises changing flight/receiver values, tab/theme/menu motion, LRU eviction
+and reuse of unchanged text. Use the same asset option for the sanitizer build.
 The real-socket test covers port exclusion, ACKs, reconnects, malformed/unknown
 frames, stdin input and expiry without incoming telemetry. It is host-only.
 
@@ -140,6 +178,7 @@ one. Generate 1280x720 masks separately if testing that mode.
 ## Bounded device replacement
 
 Copy the ARM64 executable, both matching-resolution masks and
+the host-generated **`canopy-font.kuf`**, **`canopy-font-OFL.txt`**, and
 `test-ascent-ui.sh` into a new `/tmp/kestrel-ui-*` directory using your normal
 authenticated device transport. Make the executable runnable. First run an
 offscreen check while stock services are still running:
@@ -196,6 +235,8 @@ not automatic startup after reboot.
 Live HDMI video plus the software HUD has now been confirmed by the user, with
 approximately 60-fps stock decoding continuing through the takeover. See the
 [live-video follow-up](../docs/kestrel-ui-ascent-test.md#live-video-follow-up).
+The CPU perspective version was also confirmed **“Closer and readable”** on HDMI;
+see [implementation and device measurements](../docs/kestrel-ui-perspective.md).
 
 1. Measure tearing, latency, VTX reconnect and resolution-change behavior with
    the stock decoder active.

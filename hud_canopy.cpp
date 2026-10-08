@@ -465,16 +465,16 @@ void OSD::draw_canopy_hud(const CanopyIn& in) {
 
 
     // Text sizes, in the same units draw_text() takes elsewhere in the HUD.
-    const float T_BIG   = 0.185f * sd;   // 46px headline
-    const float T_UNIT  = 0.082f * sd;   // 19-20px unit / secondary figure
-    const float T_SMALL = 0.055f * sd;   // 13px unit suffix
-    const float T_ROW   = 0.058f * sd;   // 13px detail rows
-    const float T_LABEL = 0.040f * sd;   // 9px track names
+    const float T_BIG   = canopy::kTextBig * sd;   // 46px headline
+    const float T_UNIT  = canopy::kTextUnit * sd;   // 19-20px unit / secondary figure
+    const float T_SMALL = canopy::kTextSmall * sd;   // 13px unit suffix
+    const float T_ROW   = canopy::kTextRow * sd;   // 13px detail rows
+    const float T_LABEL = canopy::kTextLabel * sd;   // 9px track names
     // The flight timer and the ARMED/DISARMED word share the top rail's gap.
     // Sized between the headline voltage and the current beside it: the timer
     // is one of the readings, not a caption on the frame, and at anything
     // smaller it was not legible in flight.
-    const float T_STATE = 0.125f * sd;   // between T_BIG (0.185) and T_UNIT (0.082)
+    const float T_STATE = canopy::kTextState * sd;
 
     // draw_text() places the BOTTOM of the glyph box at y, and the cairo
     // surface behind it draws the baseline at row 48 of 64 - a quarter of the

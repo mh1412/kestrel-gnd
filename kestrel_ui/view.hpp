@@ -1,5 +1,6 @@
 #pragma once
 #include "model.hpp"
+#include "perspective_text.hpp"
 #include "lvgl.h"
 #include <string>
 #include <vector>
@@ -10,6 +11,8 @@ public:
     View(Model& model, int width, int height, const std::string& assets);
     ~View();
     void update(uint64_t now);
+    size_t text_cache_bytes() const { return text_.cached_bytes(); }
+    uint64_t text_rasterizations() const { return text_.rasterizations(); }
 private:
     struct Asset {
         std::vector<uint8_t> pixels;
@@ -19,19 +22,24 @@ private:
     };
     Model& model_;
     int width_, height_;
+    PerspectiveText text_;
     uint64_t now_ = 0;
     Telemetry presented_;
     bool initialized_ = false, old_fresh_ = false, old_valid_ = false;
+    bool old_flight_fresh_ = false;
+    uint64_t flight_version_ = 0;
+    float cell_peak_ = 0;
     int old_theme_ = -1, old_selected_ = -1, old_tab_ = -1;
     bool old_menu_ = false;
     float menu_progress_ = 0;
     uint64_t last_tick_ = 0;
-    lv_obj_t *screen_ = nullptr, *panels_[2]{}, *status_ = nullptr, *branding_ = nullptr, *menu_ = nullptr;
-    lv_obj_t *headings_[2]{}, *states_[2]{}, *details_[2][3]{}, *menu_title_ = nullptr, *menu_rows_[6]{};
+    lv_obj_t *screen_ = nullptr, *panels_[2]{}, *status_ = nullptr, *menu_ = nullptr;
     Asset assets_[2];
     void draw_panel(lv_layer_t* layer, bool left);
-    void update_text(bool appearance_changed);
-    void update_menu();
+    void draw_menu(lv_layer_t* layer);
+    void draw_status(lv_layer_t* layer);
+    void track(lv_layer_t* layer, bool left, float start, float end, float y,
+               float height, int segments, float filled, const float* rgb, float alpha);
     static void draw_event(lv_event_t* event);
 };
 } // namespace kestrel_ui

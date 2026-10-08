@@ -32,7 +32,7 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         {"Quality grade (raw)", value(telemetry.quality_raw, valid)},
         {"RF / camera changes", "Not yet validated"}};
     if (tab == 1) return {{"Theme", hud_theme_at(theme).name, true},
-        {"Renderer", "LVGL software / canopy"}, {"Aircraft telemetry", "Awaiting validated MSP forwarding"},
+        {"Renderer", "CPU perspective / cached masks"}, {"Aircraft telemetry", "Awaiting validated MSP forwarding"},
         {"Animations", "Shared OSD link sweep / idle pulse"}};
     return {{"Receiver voltage", fresh && telemetry.voltage_mv > 0 ? std::to_string(telemetry.voltage_mv) + " mV" : "--"},
         {"CPU temperature", fresh ? std::to_string(telemetry.cpu_temperature_x100 / 100.0f) + " C" : "--"},

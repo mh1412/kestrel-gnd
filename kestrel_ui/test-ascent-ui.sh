@@ -12,6 +12,7 @@ if [ "$seconds" -ne 0 ]; then
 fi
 [ -x "$directory/kestrel-ui" ]
 [ -f "$directory/canopy-left.kui" ] && [ -f "$directory/canopy-right.kui" ]
+[ -f "$directory/canopy-font.kuf" ] && [ -f "$directory/canopy-font-OFL.txt" ]
 gui=$(pidof GlassesUI)
 backend=$(pidof ar_ldy_gnd)
 radio=$(pidof daemon_sdio)

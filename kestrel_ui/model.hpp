@@ -1,5 +1,6 @@
 #pragma once
 #include "ui/canopy.hpp"
+#include "msp_osd.hpp"
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ struct MenuRow { std::string name, value; bool editable = false; };
 class Model {
 public:
     Telemetry telemetry;
+    BfTelem flight; // Same have_* semantics as the original OSD; stock adapter does not invent FC data.
+    uint64_t flight_version = 0;
     bool menu_open = false, quit = false;
     int tab = 0, selected = 0, theme = 0;
     canopy::LinkVisual visual;

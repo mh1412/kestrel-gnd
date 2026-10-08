@@ -107,11 +107,14 @@ This is the first UI bring-up milestone; it does not yet replace `ar_ldy_gnd`.
 cmake -S . -B build-ui -DKESTREL_UI_ONLY=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-ui -j
 build-ui/kestrel_ui/kestrel-ui-assetgen 1920 1080 ui-assets
+python3 tools/ui_font_bake.py /path/to/ChakraPetch-SemiBold.ttf ui-assets/canopy-font.kuf
 build-ui/kestrel_ui/kestrel-ui --demo --assets ui-assets --seconds 5
 ```
 
 See [KestrelUI build, architecture and device testing](kestrel_ui/README.md),
 including the [Ascent test record](docs/kestrel-ui-ascent-test.md).
+The software canopy now uses the original Chakra Petch face and
+[CPU perspective-projected text](docs/kestrel-ui-perspective.md).
 
 ### Existing receiver application
 

@@ -1,10 +1,12 @@
 #include "model.hpp"
 #include "stock_protocol.hpp"
 #include "hud_theme.hpp"
+#include "font_atlas.hpp"
 #include "utils/math_utils.hpp"
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
+#include <sstream>
 
 namespace {
 void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
@@ -36,7 +38,7 @@ canopy::Point gles_projection(int width, int height, bool left, float x, float y
     return {width * (0.5f + 0.5f * cx / cw), height * (0.5f - 0.5f * cy / cw)};
 }
 }
-int main() {
+int main(int argc, char** argv) {
     using namespace kestrel_ui;
     try {
         StockFrame status{0x5a, 1, 0x80, std::vector<uint8_t>(201)};
@@ -115,7 +117,61 @@ int main() {
                     const auto ref = gles_projection(int(size.x), int(size.y), left, x, y);
                     check(std::abs(p.x - ref.x) < 0.01f && std::abs(p.y - ref.y) < 0.01f, "Software asset geometry matches GLES matrix chain");
                 }
-        std::puts("PASS: framing, corruption/fragmentation, bounds, telemetry freshness, shared canopy transitions, GLES projection and menu actions");
+        canopy::AlphaSurface pattern{0, 0, 3, 2, {10, 20, 30, 40, 50, 60}};
+        auto identity = canopy::warp_alpha(pattern, {{{2, 3}, {5, 3}, {5, 5}, {2, 5}}}, 10, 10);
+        check(identity.x == 2 && identity.y == 3 && identity.width == 3 && identity.height == 2 && identity.pixels == pattern.pixels,
+              "Identity warp preserves asymmetric texels without a triangle seam");
+        auto clipped = canopy::warp_alpha(pattern, {{{-1, 0}, {2, 0}, {2, 2}, {-1, 2}}}, 10, 10);
+        check(clipped.width == 2 && clipped.pixels == std::vector<uint8_t>({20, 30, 50, 60}), "Warp clipping preserves source offsets");
+        for (bool left : {true, false}) {
+            const auto quad = canopy::text_quad(1920, 1080, left, 14, 512, canopy::kTextBig, 96, 80, !left);
+            check(quad[1].x > quad[0].x && quad[2].x > quad[3].x, "Right panel text is never mirrored");
+            canopy::Homography map(quad);
+            for (auto uv : {canopy::Point{0.2f, 0.3f}, canopy::Point{0.5f, 0.5f}, canopy::Point{0.8f, 0.7f}}) {
+                const auto p = map.forward(uv.x, uv.y), back = map.inverse(p.x, p.y);
+                check(std::abs(back.x - uv.x) < 0.0001 && std::abs(back.y - uv.y) < 0.0001, "Projective mapping round trip");
+                const auto f = canopy::screen_frame(1920, 1080);
+                float wx = left ? f.LXo(14) : f.RXo(14) - 80 * canopy::kTextBig / 64;
+                const auto ref = canopy::project_world(1920, 1080, left, wx + uv.x * 96 * canopy::kTextBig / 64,
+                                                      f.MY(512) + (1 - uv.y) * canopy::kTextBig);
+                check(std::abs(ref.x - p.x) < 0.01 && std::abs(ref.y - p.y) < 0.01, "Glyph interior follows true 3D perspective, not affine interpolation");
+            }
+        }
+        bool rejected = false;
+        try { canopy::Homography invalid({{{0, 0}, {1, 1}, {0, 1}, {1, 0}}}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "Reject folded quads");
+
+        std::string atlas;
+        auto put = [&](uint32_t v) { for (int i = 0; i < 4; ++i) atlas += char(v >> (8 * i)); };
+        for (uint32_t v : {0x4649554bu, 1u, 40u, 64u, 48u, 2u}) put(v);
+        for (uint32_t c : {63u, 65u}) {
+            put(c); put(8); put(256);
+            std::string pixels(8 * 64, '\0');
+            pixels[44 * 8 + 2] = char(255);
+            atlas += pixels;
+        }
+        for (int i = 0; i < 4; ++i) {
+            const uint16_t kern = i == 3 ? 0xffc0 : 0; // AA -1 pixel, others zero.
+            atlas += char(kern); atlas += char(kern >> 8);
+        }
+        std::istringstream input(atlas);
+        FontAtlas font(input);
+        check(font.advance("AA") == 7 && font.advance("A?") == 8, "Baked kerning and fractional advance units");
+        auto glyphs = font.rasterize("AA");
+        check(glyphs.height == 64 && glyphs.pixels[44 * glyphs.width + 2] == 255 &&
+              glyphs.pixels[44 * glyphs.width + 5] == 255, "Glyph rasterization uses the baked baseline and kerning");
+        check(font.advance("\xe2\x80\xa2") == 4, "Unavailable Unicode falls back as one glyph, not three bytes");
+        rejected = false;
+        try { std::istringstream short_input(atlas.substr(0, atlas.size() - 1)); FontAtlas invalid(short_input); }
+        catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "Reject truncated kerning data");
+        if (argc == 3 && std::string(argv[1]) == "--font") {
+            FontAtlas real_font(argv[2]);
+            check(real_font.advance("AV") < real_font.advance("A") + real_font.advance("V"), "Real Chakra Petch kerning");
+            check(real_font.rasterize("VRX 58C \xe2\x80\xa2 11.5V").pixels.size() < 128 * 1024, "Real HUD text stays bounded");
+        }
+        std::puts("PASS: stock protocol, freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
         return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }
 }

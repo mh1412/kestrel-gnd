@@ -170,6 +170,18 @@ int main(int argc, char** argv) {
                     t.mcs = t.connected ? 4 : -1;
                     t.voltage_mv = 11512; t.cpu_temperature_x100 = 4889; t.rf_temperature_raw = 45;
                     t.frequency_raw = 5800;
+                    if (t.connected) {
+                        // Explicit host/offscreen simulation, never populated
+                        // by the stock adapter without validated FC forwarding.
+                        auto& f = model.flight;
+                        f.stamp_us = now;
+                        f.have_cell_v = f.have_pack_v = f.have_amps = f.have_speed = f.have_lq = f.have_mode = f.have_timer = true;
+                        f.cell_v = 4.10f - 0.08f * std::sin(float(now - started) / 2000000);
+                        f.pack_v = f.cell_v * 4; f.amps = 5.6f; f.speed_kmh = 72; f.lq_pct = 94;
+                        f.arm = 1; f.timer_s = 194 + int((now - started) / 1000000);
+                        std::snprintf(f.mode, sizeof(f.mode), "ACRO");
+                        ++model.flight_version;
+                    }
                 }
                 input.poll(model);
                 if (menu_requested) { menu_requested = 0; model.key(kestrel_ui::Key::Menu); }
@@ -181,11 +193,12 @@ int main(int argc, char** argv) {
                 if (now >= next_log) {
                     rusage usage{}; getrusage(RUSAGE_SELF, &usage);
                     const auto& t = model.telemetry;
-                    std::printf("STATUS frames=%llu unknown=%llu bad=%llu layout_bytes=%u connected=%d mcs=%d voltage_mv=%d cpu_x100=%d state=\"%s\" rss_kib=%ld render_avg_us=%llu flushes=%llu bytes=%llu\n",
+                    std::printf("STATUS frames=%llu unknown=%llu bad=%llu layout_bytes=%u connected=%d mcs=%d voltage_mv=%d cpu_x100=%d state=\"%s\" rss_kib=%ld render_avg_us=%llu flushes=%llu bytes=%llu text_bytes=%zu text_rasters=%llu\n",
                         (unsigned long long)t.status_frames, (unsigned long long)t.unknown_frames, (unsigned long long)t.bad_frames,
                         t.status_payload_bytes, t.connected, t.mcs, t.voltage_mv, t.cpu_temperature_x100, model.status(now).c_str(), usage.ru_maxrss,
                         (unsigned long long)(ticks ? render_us / ticks : 0), (unsigned long long)display.flushes,
-                        (unsigned long long)display.bytes_written);
+                        (unsigned long long)display.bytes_written, view.text_cache_bytes(),
+                        (unsigned long long)view.text_rasterizations());
                     next_log = now + 2000000;
                 }
                 usleep(2000);
