@@ -10,6 +10,15 @@ set(KESTREL_GND_VERSION_LABEL "2026.10.beta2" CACHE STRING "Version shown in the
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The stock AR9311 UI is an independent process and needs no decoder, radio
+# client, DRM or GPU development packages. Leave the existing build default.
+option(KESTREL_UI_ONLY "Build the standalone software KestrelUI instead of the receiver" OFF)
+if(KESTREL_UI_ONLY)
+    include(CTest)
+    add_subdirectory(kestrel_ui)
+    return()
+endif()
+
 add_compile_options("-Wno-address-of-packed-member")
 set(TARGET kestrel-gnd)
 set(SOURCE_FILES

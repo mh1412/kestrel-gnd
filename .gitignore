@@ -24,3 +24,9 @@ village.png
 village_1080p_60fps.mp4
 village_1440p_60fps.mp4
 samples/
+
+# Standalone software UI builds and host-generated canopy masks.
+/build-ui/
+/build-ui-arm64/
+/build-ui-sanitize/
+/ui-assets/

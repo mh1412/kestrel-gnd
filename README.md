@@ -96,6 +96,25 @@ associate with when several are known.
 
 ## Building
 
+### Standalone Ascent software UI
+
+The `ascent-vrx-support` work adds an initial **`kestrel-ui`** process for the
+standard AR9311 Ascent VRX. It uses LVGL software rendering and the stock
+backend's GUI telemetry interface, with no EGL/GLES/GBM/DRM or decoder dependency.
+This is the first UI bring-up milestone; it does not yet replace `ar_ldy_gnd`.
+
+```sh
+cmake -S . -B build-ui -DKESTREL_UI_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-ui -j
+build-ui/kestrel_ui/kestrel-ui-assetgen 1920 1080 ui-assets
+build-ui/kestrel_ui/kestrel-ui --demo --assets ui-assets --seconds 5
+```
+
+See [KestrelUI build, architecture and device testing](kestrel_ui/README.md),
+including the [Ascent test record](docs/kestrel-ui-ascent-test.md).
+
+### Existing receiver application
+
 ```sh
 cmake -S . -B build -DUSE_RKMPP=ON && cmake --build build -j
 ```
