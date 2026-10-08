@@ -129,6 +129,7 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
     }
     const auto& th = hud_theme_at(model_.theme);
     const auto& t = model_.telemetry;
+    const bool picked = model_.menu_open && model_.stage == MenuStage::Pick && model_.side == (left ? 0 : 1);
     const auto& bf = model_.flight;
     const bool flight_fresh = bf.stamp_us && now_ >= bf.stamp_us && now_ - bf.stamp_us < 2000000;
     const auto& a = assets_[left ? 0 : 1];
@@ -185,7 +186,7 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
     const float state_width = text_.design_advance(state, canopy::kTextState);
     constexpr float rest[] = {0.663f, 0.706f, 0.741f};
     for (float y : {456.0f, 596.0f}) {
-        const float reach = 252 * v.rule;
+        const float reach = picked ? 252 : 252 * v.rule;
         for (int segment = 0; segment < 32; ++segment) {
             float x0 = -canopy::kBleed + (252 + canopy::kBleed) * segment / 32;
             float x1 = std::min(reach, -canopy::kBleed + (252 + canopy::kBleed) * (segment + 1) / 32);
@@ -202,9 +203,10 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
                 lv_draw_line_dsc_init(&line);
                 line.p1 = {int32_t(std::lround(p.x)), int32_t(std::lround(p.y))};
                 line.p2 = {int32_t(std::lround(q.x)), int32_t(std::lround(q.y))};
-                line.width = std::max(1, height_ / 360); line.color = color(left && bf.arm == 1 ? th.accent : rest);
+                line.width = picked ? std::max(2, height_ / 270) : std::max(1, height_ / 360);
+                line.color = color(picked || (left && bf.arm == 1) ? th.accent : rest);
                 const float taper = std::clamp((span[0] - 126) / 126, 0.0f, 1.0f);
-                line.opa = opacity(0.8f * (1 - taper * taper) * v.rail_dim);
+                line.opa = opacity((1 - taper * taper) * (picked ? 1 - menu_progress_ : 0.8f * v.rail_dim));
                 lv_draw_line(layer, &line);
             }
         }
@@ -256,9 +258,6 @@ void View::draw_picker(lv_layer_t* layer) {
     const float alpha = 1 - menu_progress_;
     for (int side = 0; side < 2; ++side) {
         const bool selected = side == model_.side;
-        const auto& asset = assets_[side];
-        rect(layer, side ? width_ - width_ * 31 / 100 : 0, asset.y - 3, width_ * 31 / 100,
-             height_ - asset.y, selected ? th.accent : th.quiet, alpha * (selected ? 0.65f : 0.2f), 2);
         text_.panel(layer, side ? "AIR UNIT" : "GOGGLE", side == 0, 56, 412,
                     canopy::kTextState, side != 0, selected ? th.text : th.quiet, alpha * (selected ? 1 : 0.6f));
         text_.panel(layer, selected ? "OK TO OPEN" : "LEFT / RIGHT", side == 0, 56, 439,

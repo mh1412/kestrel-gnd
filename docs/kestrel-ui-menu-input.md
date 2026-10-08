@@ -34,6 +34,9 @@ The menu unfolds upward from the wing, fades its content in, and dims the select
 instrument as that blade becomes settings. Editing expands the selected row into
 a three-value ladder, with the current value accented. The footer explains the
 selected reading/action and how to apply or cancel.
+The side picker accents the selected wing's perspective-projected top and bottom
+divider rails; it does not draw an axis-aligned selection box. Existing taper and
+state-label gaps are preserved.
 
 ## Input paths
 
