@@ -56,6 +56,10 @@ const char* Model::tab_name(int t) {
     return names[t >= 0 && t < 7 ? t : 0];
 }
 std::vector<int> Model::side_tabs() const { return side == 0 ? std::vector<int>{1, 3, 2, 4} : std::vector<int>{0, 6, 5}; }
+int Model::remembered_section() const {
+    const auto tabs = side_tabs();
+    return std::find(tabs.begin(), tabs.end(), remembered_tab_[side]) == tabs.end() ? tabs.front() : remembered_tab_[side];
+}
 std::vector<MenuRow> Model::rows(uint64_t now) const {
     const bool fresh = telemetry.fresh(now), valid = telemetry.link_valid(now);
     auto value = [&](int v, bool available) { return available ? std::to_string(v) : "--"; };

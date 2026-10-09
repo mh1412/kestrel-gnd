@@ -12,7 +12,8 @@
 #include <unistd.h>
 
 namespace kestrel_ui {
-Display::Display(int w, int h, const std::string& framebuffer) : width_(w), height_(h) {
+Display::Display(int w, int h, const std::string& framebuffer, int draw_rows) : width_(w), height_(h) {
+    if (draw_rows < 1 || draw_rows > 512) throw std::invalid_argument("Invalid partial draw-buffer height");
     if (!framebuffer.empty()) {
         fd_ = open(framebuffer.c_str(), O_RDWR | O_CLOEXEC);
         if (fd_ < 0) throw std::runtime_error("Cannot open framebuffer: " + std::string(std::strerror(errno)));
@@ -57,10 +58,11 @@ Display::Display(int w, int h, const std::string& framebuffer) : width_(w), heig
             throw;
         }
     }
-    // One retained CPU surface for screenshots, plus a 48-row LVGL partial
-    // draw buffer. No GPU context and no full-frame redraw on each UI tick.
+    // A larger partial buffer reduces repeated custom DRAW callbacks during
+    // menu animation. 192 rows costs ~1.4 MiB at 1080p, still no full-frame
+    // draw buffer or GPU context. The retained surface supports screenshots.
     pixels_.resize(size_t(width_) * height_);
-    draw_buffer_.resize(size_t(width_) * 48);
+    draw_buffer_.resize(size_t(width_) * draw_rows);
     display_ = lv_display_create(width_, height_);
     if (!display_) throw std::runtime_error("Cannot create LVGL display");
     lv_display_set_color_format(display_, LV_COLOR_FORMAT_ARGB8888);
@@ -78,7 +80,9 @@ Display::~Display() {
     if (fd_ >= 0) close(fd_);
 }
 void Display::flush_cb(lv_display_t* display, const lv_area_t* area, uint8_t* pixels) {
-    static_cast<Display*>(lv_display_get_user_data(display))->flush(*area, pixels);
+    auto* self = static_cast<Display*>(lv_display_get_user_data(display));
+    self->flush(*area, pixels);
+    if (lv_display_flush_is_last(display)) ++self->presentations;
     lv_display_flush_ready(display);
 }
 void Display::flush(const lv_area_t& a, const uint8_t* source) {

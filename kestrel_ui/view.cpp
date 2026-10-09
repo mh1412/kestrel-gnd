@@ -69,18 +69,58 @@ View::View(Model& model, int w, int h, const std::string& assets)
     picker_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(picker_);
     lv_obj_set_pos(picker_, 0, h * 58 / 100);
-    lv_obj_set_size(picker_, w, h - h * 58 / 100);
+    // Only the two label rows live here. Hiding a full-height picker used to
+    // invalidate/redraw both complete HUD wings at every open/fold keyframe.
+    lv_obj_set_size(picker_, w, h * 74 / 100 - h * 58 / 100);
     lv_obj_remove_flag(picker_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(picker_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(picker_, LV_OBJ_FLAG_HIDDEN);
     menu_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(menu_);
-    lv_obj_set_size(menu_, w * 34 / 100, h - h * 6 / 100);
+    lv_obj_set_size(menu_, w * 34 / 100, h * 92 / 100);
     lv_obj_remove_flag(menu_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(menu_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
 }
-View::~View() { lv_obj_clean(screen_); }
+View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
+void View::drop_menu_snapshot() {
+    if (!menu_snapshot_) return;
+    lv_image_cache_drop(menu_snapshot_); lv_image_header_cache_drop(menu_snapshot_);
+    lv_draw_buf_destroy(menu_snapshot_); menu_snapshot_ = nullptr;
+}
+void View::prepare_menu_snapshot() {
+    // Pre-render the likely blade while picking, before its animation begins.
+    // This is UI-thread-only and restores the controller's public state; no
+    // key, command, preference or backend callback is invoked.
+    const int saved_tab = model_.tab, saved_selected = model_.selected;
+    const auto saved_stage = model_.stage;
+    if (model_.stage == MenuStage::Pick) {
+        model_.tab = model_.remembered_section(); model_.selected = 0; model_.stage = MenuStage::Browse;
+    }
+    std::ostringstream signature;
+    signature << model_.side << ':' << model_.tab << ':' << model_.selected << ':' << model_.theme << ':'
+              << (model_.stage == MenuStage::Edit) << ':' << model_.selected_help(now_);
+    for (const auto& row : model_.rows(now_)) signature << '\n' << row.id << ':' << row.value;
+    const std::string key = signature.str();
+    if (menu_snapshot_ && key == menu_snapshot_signature_) {
+        model_.tab = saved_tab; model_.selected = saved_selected; model_.stage = saved_stage; return;
+    }
+    const float progress = menu_progress_;
+    const int active_side = active_menu_side_;
+    active_menu_side_ = model_.side; menu_progress_ = 1; capturing_menu_ = true;
+    lv_obj_set_pos(menu_, active_menu_side_ ? width_ - lv_obj_get_width(menu_) : 0, height_ * 6 / 100);
+    drop_menu_snapshot();
+    // The blade is entirely opaque while moving. XRGB avoids an unnecessary
+    // per-pixel source-alpha blend when copying its cached image to ARGB.
+    menu_snapshot_ = lv_snapshot_take(menu_, LV_COLOR_FORMAT_XRGB8888);
+    capturing_menu_ = false; menu_progress_ = progress; active_menu_side_ = active_side;
+    model_.tab = saved_tab; model_.selected = saved_selected; model_.stage = saved_stage;
+    lv_obj_set_pos(menu_, active_side ? width_ - lv_obj_get_width(menu_) : 0, height_ * 6 / 100);
+    if (menu_snapshot_) {
+        menu_snapshot_signature_ = key; ++menu_snapshot_count_;
+        lv_obj_invalidate(menu_);
+    }
+}
 void View::draw_event(lv_event_t* e) {
     auto* self = static_cast<View*>(lv_event_get_user_data(e));
     auto* target = lv_event_get_target(e);
@@ -120,13 +160,10 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
     auto v = model_.visual;
     if (!v.visible && !model_.menu_open) return;
     if (!v.visible) { v.visible = true; v.rule = v.shade = v.block = 1; v.idle_dim = v.rail_dim = 0.65f; }
-    // The selected instrument yields to its unfolded settings blade. A cached
-    // opacity fold avoids reprojecting every glyph during this animation.
-    if ((left ? 0 : 1) == active_menu_side_) {
-        const float remaining = 1 - menu_progress_;
-        if (remaining <= 0) return;
-        v.idle_dim *= remaining; v.rail_dim *= remaining;
-    }
+    // The unfolded blade replaces this instrument. Do not paint/fade the HUD
+    // underneath its translucent backdrop: that adds a second alpha-composite
+    // pass over the same large area on every animation frame.
+    if ((left ? 0 : 1) == active_menu_side_ && menu_progress_ > 0) return;
     const auto& th = hud_theme_at(model_.theme);
     const auto& t = model_.telemetry;
     const bool picked = model_.menu_open && model_.stage == MenuStage::Pick && model_.side == (left ? 0 : 1);
@@ -264,6 +301,15 @@ void View::draw_picker(lv_layer_t* layer) {
                     canopy::kTextRow, side != 0, th.quiet, alpha * 0.8f);
     }
 }
+lv_area_t View::menu_reveal(float progress) const {
+    const float e = progress * progress * (3 - 2 * progress);
+    const int folded_y = assets_[active_menu_side_].y;
+    const int y = int(folded_y + (height_ * 6 / 100 - folded_y) * e);
+    const int w = int(width_ * 0.31f + (lv_obj_get_width(menu_) - width_ * 0.31f) * e);
+    const int h = int((height_ - folded_y) * (1 - e) + (height_ * 92 / 100) * e);
+    const int x = active_menu_side_ ? width_ - w : 0;
+    return {x, y, x + w - 1, y + h - 1};
+}
 void View::draw_menu(lv_layer_t* layer) {
     const auto& th = hud_theme_at(model_.theme);
     lv_area_t bounds;
@@ -271,13 +317,27 @@ void View::draw_menu(lv_layer_t* layer) {
     const int x = bounds.x1, y = bounds.y1, w = lv_obj_get_width(menu_), h = height_ * 92 / 100;
     const float u = height_ / 1080.0f;
     const int pad = int(22 * u), row_h = int(50 * u);
-    const float e = menu_progress_ * menu_progress_ * (3 - 2 * menu_progress_);
-    const int folded_y = assets_[active_menu_side_].y;
-    const int backdrop_y = int(folded_y + (y - folded_y) * e);
-    const int backdrop_w = int(width_ * 0.31f + (w - width_ * 0.31f) * e);
-    const int backdrop_h = int((height_ - folded_y) * (1 - e) + h * e);
-    const int backdrop_x = active_menu_side_ ? width_ - backdrop_w : 0;
-    rect(layer, backdrop_x, backdrop_y, backdrop_w, backdrop_h, th.ground, 0.94f * std::min(1.0f, menu_progress_ * 1.6f));
+    const auto reveal = menu_reveal(menu_progress_);
+    const int backdrop_x = reveal.x1, backdrop_y = reveal.y1;
+    const int backdrop_w = reveal.x2 - reveal.x1 + 1, backdrop_h = reveal.y2 - reveal.y1 + 1;
+    if (!capturing_menu_ && menu_snapshot_) {
+        // Reveal a single completed plane. Its opaque backing lets LVGL copy
+        // most pixels, avoiding rerendering/blending all menu primitives.
+        const lv_area_t previous_clip = layer->_clip_area;
+        lv_area_t clipped{std::max(previous_clip.x1, reveal.x1), std::max(previous_clip.y1, reveal.y1),
+                          std::min(previous_clip.x2, reveal.x2), std::min(previous_clip.y2, reveal.y2)};
+        if (clipped.x1 <= clipped.x2 && clipped.y1 <= clipped.y2) {
+            layer->_clip_area = clipped;
+            lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = menu_snapshot_; d.opa = LV_OPA_COVER;
+            lv_area_t image_area{x, y, x + int(menu_snapshot_->header.w) - 1, y + int(menu_snapshot_->header.h) - 1};
+            lv_draw_image(layer, &d, &image_area);
+            layer->_clip_area = previous_clip;
+        }
+        return;
+    }
+    // Keep the blade opaque when settled too: fading back to 94% requires a
+    // costly full-plane blend exactly at the animation's final keyframe.
+    rect(layer, backdrop_x, backdrop_y, backdrop_w, backdrop_h, th.ground, 1);
     rect(layer, backdrop_x, backdrop_y, backdrop_w, std::max(1, int(3 * u)), th.accent, menu_progress_);
     if (menu_progress_ < 0.5f) return;
     const float content_alpha = std::clamp((menu_progress_ - 0.5f) * 2, 0.0f, 1.0f);
@@ -350,9 +410,17 @@ void View::update(uint64_t now) {
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
     const bool unfolded = model_.menu_open && model_.stage != MenuStage::Pick;
+    // Do not rebuild on telemetry changes during motion. A bounded snapshot
+    // is refreshed in the picker or when the fully opened content changes.
+    // Keep the outgoing blade intact during closure, even though the model has
+    // already returned to Pick (or the user changes the next side quickly).
+    if (model_.menu_open && (menu_progress_ == 0 || (unfolded && menu_progress_ == 1))) prepare_menu_snapshot();
     const float target = unfolded ? 1 : 0;
+    const auto old_reveal = menu_reveal(menu_progress_);
     const float next = menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f);
     const bool moving = next != menu_progress_;
+    const bool wing_visibility_changed = (menu_progress_ == 0) != (next == 0);
+    animating_ = moving || model_.visual.animating;
     menu_progress_ = next;
     if (unfolded) active_menu_side_ = model_.side;
     const bool right_side = active_menu_side_ != 0;
@@ -360,7 +428,9 @@ void View::update(uint64_t now) {
     const int mx = right_side ? width_ - menu_w : 0;
     if (moving || old_tab_ != model_.tab || model_.menu_version != menu_version_) lv_obj_set_pos(menu_, mx, height_ * 6 / 100);
     hidden(menu_, next <= 0);
-    hidden(picker_, !model_.menu_open || model_.stage != MenuStage::Pick);
+    // Reveal the two-wing picker after the closing blade has settled. Fading
+    // it in during closure redraws both HUD wings for every moving frame.
+    hidden(picker_, !model_.menu_open || model_.stage != MenuStage::Pick || menu_progress_ > 0);
     const auto& t = model_.telemetry;
     const auto& flight = model_.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
@@ -375,9 +445,31 @@ void View::update(uint64_t now) {
     const bool menu = old_menu_ != model_.menu_open || old_tab_ != model_.tab || old_selected_ != model_.selected || model_.menu_version != menu_version_;
     const bool counters = t.status_frames != presented_.status_frames || t.unknown_frames != presented_.unknown_frames ||
                           t.bad_frames != presented_.bad_frames || model_.rejected_inputs != rejected_inputs_;
-    if (moving || appearance || data || menu || (model_.menu_open && (model_.tab == 2 || model_.tab == 4) && counters)) lv_obj_invalidate(menu_);
-    if (appearance || menu || moving) lv_obj_invalidate(picker_);
-    if (appearance || data || model_.visual.animating) for (auto* p : panels_) lv_obj_invalidate(p);
+    if (appearance || (!moving && menu) || (moving && next == 0) ||
+        (!moving && (data || (model_.menu_open && (model_.tab == 2 || model_.tab == 4) && counters))))
+        lv_obj_invalidate(menu_);
+    else if (moving) {
+        // The cached plane is stationary: pixels shared by the two reveals
+        // have not changed. Repaint only newly exposed/removed edge strips,
+        // rather than copying the whole growing blade every frame.
+        const auto reveal = menu_reveal(next);
+        const lv_area_t shared{std::max(old_reveal.x1, reveal.x1), std::max(old_reveal.y1, reveal.y1),
+                               std::min(old_reveal.x2, reveal.x2), std::min(old_reveal.y2, reveal.y2)};
+        auto invalidate = [&](lv_area_t area) {
+            if (area.x1 <= area.x2 && area.y1 <= area.y2) lv_obj_invalidate_area(menu_, &area);
+        };
+        for (const auto area : {old_reveal, reveal}) {
+            if (shared.x1 > shared.x2 || shared.y1 > shared.y2) { invalidate(area); continue; }
+            invalidate({area.x1, area.y1, area.x2, shared.y1 - 1});
+            invalidate({area.x1, shared.y2 + 1, area.x2, area.y2});
+            invalidate({area.x1, shared.y1, shared.x1 - 1, shared.y2});
+            invalidate({shared.x2 + 1, shared.y1, area.x2, shared.y2});
+        }
+    }
+    if (appearance || menu) lv_obj_invalidate(picker_);
+    if (appearance || data || model_.visual.animating || (menu && next == 0))
+        for (auto* p : panels_) lv_obj_invalidate(p);
+    else if (wing_visibility_changed) lv_obj_invalidate(panels_[active_menu_side_]);
     hidden(status_, valid);
     if (!valid) {
         if (appearance || data) lv_obj_invalidate(status_);

@@ -56,6 +56,7 @@ public:
     UiPreferences preferences() const { return {theme, fps, show_details, key_repeat}; }
     void set_preferences(const UiPreferences& p);
     std::vector<int> side_tabs() const;
+    int remembered_section() const;
     std::string describe() const;
     std::string selected_help(uint64_t now) const;
     int option_index() const;

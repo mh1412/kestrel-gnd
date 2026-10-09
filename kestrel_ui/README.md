@@ -24,6 +24,8 @@ backend adapter.
   styling. Source text sizes and themes are shared with the GLES implementation.
 - GOGGLE/AIR UNIT picker, unfolding side menus, section/row navigation, editable
   local UI settings with preview/apply/cancel, contextual help and remembered sections.
+- Cached opaque menu planes and incremental reveal/erase strips, with absolute
+  frame deadlines and animation-specific average/p95/max rendering diagnostics.
 - Stdin/evdev keys, validated stock menu packets on loopback UDP 6222, an
   owner-only local control socket, SSH keyboard client and SIGUSR1 menu toggle.
 - Nonblocking loopback TCP 2765 server for the stock backend's push connection.
@@ -70,6 +72,7 @@ labels and gauges. The stock backend leaves those fields unavailable.
 ```text
 ui/canopy.hpp                 Shared GLES/software geometry and link animation
 ui/projective.hpp             Graphics-free inverse projective A8 sampler
+ui/frame_cadence.hpp          Absolute frame deadlines / overrun skipping
 kestrel_ui/model.*           Graphics-free UI state and initial local menu
 kestrel_ui/input.*           Terminal/evdev/stock keys and local control socket
 kestrel_ui/preferences.*     Validated, atomic local UI-preference storage
@@ -80,6 +83,7 @@ kestrel_ui/view.*            LVGL canopy view and menu
 kestrel_ui/font_atlas.*      Baked glyph/kerning loader and text composition
 kestrel_ui/perspective_text.* Cached CPU text projection and LVGL presentation
 kestrel_ui/assetgen.cpp      Deterministic host-side panel-mask generator
+kestrel_ui/animation_bench.cpp Offscreen repeated unfold/fold profiler
 ```
 
 No decoded video crosses into the UI process. A future Kestrel IPC adapter can
@@ -175,7 +179,7 @@ Use an AArch64 Linux GCC/G++ toolchain with static C/C++ runtime libraries:
 
 ```sh
 cmake -S . -B build-ui-arm64 -DKESTREL_UI_ONLY=ON -DKESTREL_UI_STATIC=ON \
-    -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=MinSizeRel \
+    -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/ascent-ui-aarch64.cmake
 cmake --build build-ui-arm64 -j
 aarch64-linux-gnu-strip build-ui-arm64/kestrel_ui/kestrel-ui
@@ -186,8 +190,31 @@ file build-ui-arm64/kestrel_ui/kestrel-ui
 toolchain. A relocated/extracted compiler can additionally need `-B` search
 paths in **C, CXX and ASM** flags; LVGL includes preprocessed assembly units.
 Static linking avoids requiring the stock glibc 2.25/libstdc++ symbol versions.
+Use `Release` for device performance measurements: the size-optimized build was
+substantially slower in the CPU renderer.
 Generate panel masks using the **host** assetgen executable, not the cross-built
 one. Generate 1280x720 masks separately if testing that mode.
+
+## Animation profiling
+
+```sh
+build-ui/kestrel_ui/kestrel-ui-animation-bench ui-assets 50 192 paced
+```
+
+The six-second offscreen benchmark repeatedly unfolds/folds the GOGGLE blade;
+arguments select cadence, partial draw-buffer rows (1..512) and `paced` or
+`timer` refresh. `paced` matches the UI's explicit refresh/absolute deadlines.
+Animation costs exclude the first second; CPU use and skipped deadlines cover
+the entire run. CPU percentage is relative to one core, not the whole chip.
+It does not measure framebuffer writes, HDMI scanout, tearing or vsync.
+
+The UI's `ANIMATION` log separately reports the last 256 animation-tick costs
+(including framebuffer copies on-device), plus cumulative ticks/paint counts.
+`STATUS render_avg_us` includes idle ticks and is not an animation benchmark.
+Menus now use an opaque backing, including when settled, to avoid a full-plane
+alpha blend at the final keyframe. The picker remains perspective text/rails;
+its label object no longer damages both complete HUD wings when hidden.
+See [animation measurements and remaining cold hitches](../docs/kestrel-ui-animation.md).
 
 ## Bounded device replacement
 

@@ -4,6 +4,7 @@
 #include "font_atlas.hpp"
 #include "input.hpp"
 #include "preferences.hpp"
+#include "ui/frame_cadence.hpp"
 #include "utils/math_utils.hpp"
 #include <cmath>
 #include <cstdio>
@@ -46,6 +47,9 @@ canopy::Point gles_projection(int width, int height, bool left, float x, float y
 int main(int argc, char** argv) {
     using namespace kestrel_ui;
     try {
+        check(next_frame_deadline(1000, 1090, 100) == 1100, "Small render/poll jitter does not move cadence phase");
+        check(next_frame_deadline(1000, 1100, 100) == 1200, "A missed exact deadline is skipped, not retried");
+        check(next_frame_deadline(1000, 1435, 100) == 1500, "Long overruns skip stale animation poses");
         StockFrame status{0x5a, 1, 0x80, std::vector<uint8_t>(201)};
         status.payload[0] = 1;
         le32(status.payload, 5, -1); le32(status.payload, 9, 1);

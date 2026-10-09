@@ -13,6 +13,8 @@ public:
     void update(uint64_t now);
     size_t text_cache_bytes() const { return text_.cached_bytes(); }
     uint64_t text_rasterizations() const { return text_.rasterizations(); }
+    bool animating() const { return animating_; }
+    uint64_t menu_snapshots() const { return menu_snapshot_count_; }
 private:
     struct Asset {
         std::vector<uint8_t> pixels;
@@ -36,13 +38,21 @@ private:
     int active_menu_side_ = 0;
     bool old_menu_ = false;
     float menu_progress_ = 0;
+    bool animating_ = false;
+    bool capturing_menu_ = false;
+    lv_draw_buf_t* menu_snapshot_ = nullptr;
+    std::string menu_snapshot_signature_;
+    uint64_t menu_snapshot_count_ = 0;
     uint64_t last_tick_ = 0;
     lv_obj_t *screen_ = nullptr, *panels_[2]{}, *status_ = nullptr, *menu_ = nullptr, *picker_ = nullptr;
     Asset assets_[2];
     void draw_panel(lv_layer_t* layer, bool left);
     void draw_menu(lv_layer_t* layer);
+    lv_area_t menu_reveal(float progress) const;
     void draw_status(lv_layer_t* layer);
     void draw_picker(lv_layer_t* layer);
+    void prepare_menu_snapshot();
+    void drop_menu_snapshot();
     void track(lv_layer_t* layer, bool left, float start, float end, float y,
                float height, int segments, float filled, const float* rgb, float alpha);
     static void draw_event(lv_event_t* event);

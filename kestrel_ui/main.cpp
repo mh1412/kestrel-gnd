@@ -4,6 +4,7 @@
 #include "input.hpp"
 #include "preferences.hpp"
 #include "hud_theme.hpp"
+#include "ui/frame_cadence.hpp"
 #include <cerrno>
 #include <cstdlib>
 #include <csignal>
@@ -116,6 +117,8 @@ int main(int argc, char** argv) {
             model.input_sources = input.sources(); model.control_path = o.control;
             const uint64_t started = kestrel_ui::monotonic_us();
             uint64_t next_tick = started, next_log = started, render_us = 0, ticks = 0;
+            uint64_t animated_ticks = 0, animated_paints = 0;
+            std::vector<uint64_t> animation_costs;
             uint64_t demo_tick = 0;
             std::printf("KESTREL_UI backend=%s display=%s cadence=%d size=%dx%d\n", o.demo ? "DEMO" : "stock",
                         o.framebuffer.empty() ? "offscreen" : o.framebuffer.c_str(), model.fps, display.width(), display.height());
@@ -152,19 +155,43 @@ int main(int argc, char** argv) {
                     next_tick = now;
                 }
                 if (now >= next_tick) {
+                    const uint64_t frame_started = kestrel_ui::monotonic_us(), paints_before = display.presentations;
                     model.tick(now); view.update(now); lv_timer_handler();
+                    // The application owns animation cadence. LVGL's timer
+                    // may not yet be due after variable update/draw work; force
+                    // this tick's damage out rather than skipping its pose.
+                    lv_refr_now(display.lv_display());
+                    if (view.animating()) {
+                        ++animated_ticks;
+                        if (display.presentations != paints_before) ++animated_paints;
+                        if (animation_costs.size() == 256) animation_costs.erase(animation_costs.begin());
+                        animation_costs.push_back(kestrel_ui::monotonic_us() - frame_started);
+                    }
                     render_us += kestrel_ui::monotonic_us() - now; ++ticks;
-                    next_tick = now + 1000000 / model.fps;
+                    const uint64_t period = 1000000 / model.fps;
+                    const uint64_t finished = kestrel_ui::monotonic_us();
+                    // Keep absolute cadence without accumulating poll jitter,
+                    // and skip missed deadlines instead of chasing stale poses.
+                    next_tick = kestrel_ui::next_frame_deadline(next_tick, finished, period);
                 }
                 if (now >= next_log) {
                     rusage usage{}; getrusage(RUSAGE_SELF, &usage);
                     const auto& t = model.telemetry;
-                    std::printf("STATUS frames=%llu unknown=%llu bad=%llu layout_bytes=%u connected=%d mcs=%d voltage_mv=%d cpu_x100=%d state=\"%s\" rss_kib=%ld render_avg_us=%llu flushes=%llu bytes=%llu text_bytes=%zu text_rasters=%llu\n",
+                    std::printf("STATUS frames=%llu unknown=%llu bad=%llu layout_bytes=%u connected=%d mcs=%d voltage_mv=%d cpu_x100=%d state=\"%s\" rss_kib=%ld render_avg_us=%llu flushes=%llu bytes=%llu text_bytes=%zu text_rasters=%llu paints=%llu snapshots=%llu\n",
                         (unsigned long long)t.status_frames, (unsigned long long)t.unknown_frames, (unsigned long long)t.bad_frames,
                         t.status_payload_bytes, t.connected, t.mcs, t.voltage_mv, t.cpu_temperature_x100, model.status(now).c_str(), usage.ru_maxrss,
                         (unsigned long long)(ticks ? render_us / ticks : 0), (unsigned long long)display.flushes,
                         (unsigned long long)display.bytes_written, view.text_cache_bytes(),
-                        (unsigned long long)view.text_rasterizations());
+                        (unsigned long long)view.text_rasterizations(), (unsigned long long)display.presentations,
+                        (unsigned long long)view.menu_snapshots());
+                    if (!animation_costs.empty()) {
+                        auto sorted = animation_costs; std::sort(sorted.begin(), sorted.end());
+                        uint64_t sum = 0; for (auto cost : sorted) sum += cost;
+                        std::printf("ANIMATION ticks=%llu painted=%llu recent_avg_us=%llu recent_p95_us=%llu recent_max_us=%llu\n",
+                                    (unsigned long long)animated_ticks, (unsigned long long)animated_paints,
+                                    (unsigned long long)(sum / sorted.size()),
+                                    (unsigned long long)sorted[(sorted.size() - 1) * 95 / 100], (unsigned long long)sorted.back());
+                    }
                     next_log = now + 2000000;
                 }
                 usleep(2000);

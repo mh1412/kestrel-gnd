@@ -57,6 +57,56 @@ int main(int argc, char** argv) {
                 lv_refr_now(display.lv_display());
             }
             if (view.text_rasterizations() != warm) throw std::runtime_error("Unchanged text was rasterized again");
+            // Hidden picker prewarming must capture real pixels; both sides
+            // must reveal the same opaque ground at the correct screen edge.
+            auto check_incremental = [&]() {
+                const auto incremental = display.pixels();
+                lv_obj_invalidate(lv_screen_active()); lv_refr_now(display.lv_display());
+                const auto first = std::mismatch(incremental.begin(), incremental.end(), display.pixels().begin(),
+                    [](uint32_t a, uint32_t b) { return a == b || ((a | b) >> 24) == 0; }).first - incremental.begin();
+                if (size_t(first) != incremental.size()) {
+                    std::fprintf(stderr, "redraw difference side=%d stage=%d animating=%d xy=%ld,%ld before=%08x after=%08x\n",
+                                 model.side, int(model.stage), view.animating(), long(first % 1920), long(first / 1920),
+                                 incremental[first], display.pixels()[first]);
+                    throw std::runtime_error("Incremental menu reveal differs from a complete redraw");
+                }
+            };
+            for (int side : {0, 1}) {
+                model.menu_open = false; model.stage = kestrel_ui::MenuStage::Pick;
+                for (int i = 0; i < 8; ++i) {
+                    now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                }
+                model.menu_open = true; model.side = side; model.stage = kestrel_ui::MenuStage::Pick;
+                now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                const auto captured = view.menu_snapshots();
+                if (!captured) throw std::runtime_error("Hidden picker did not prepare a menu snapshot");
+                model.key(kestrel_ui::Key::Enter);
+                now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                const auto prepared = view.menu_snapshots();
+                now += 40000; ++model.telemetry.cpu_temperature_x100;
+                model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                check_incremental();
+                if (view.menu_snapshots() != prepared) throw std::runtime_error("Moving blade rebuilt its snapshot for telemetry");
+                const auto& ground = hud_theme_at(model.theme).ground;
+                const uint32_t expected = 0xff000000u | uint32_t(uint8_t(ground[0] * 255)) << 16 |
+                    uint32_t(uint8_t(ground[1] * 255)) << 8 | uint8_t(ground[2] * 255);
+                const int x = side ? 1915 : 4;
+                if (display.pixels()[size_t(800) * 1920 + x] != expected)
+                    throw std::runtime_error("Cached blade was empty, translucent or positioned on the wrong side");
+                for (int i = 0; i < 8; ++i) {
+                    now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                    check_incremental();
+                }
+                const auto closing = view.menu_snapshots();
+                model.key(kestrel_ui::Key::Back);
+                now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                if (view.menu_snapshots() != closing) throw std::runtime_error("Closing blade replaced its outgoing snapshot");
+                check_incremental();
+                for (int i = 0; i < 8; ++i) {
+                    now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                    check_incremental();
+                }
+            }
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }
