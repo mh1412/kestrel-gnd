@@ -73,7 +73,7 @@ def main():
         with socket.create_connection(("127.0.0.1", port), timeout=1) as again:
             # The old partial frame must not contaminate this new stream.
             again.sendall(packet(body, flags=0) + packet(b"\0" + inner_status[9:], channel=0, flags=0))
-            analog = bytes.fromhex("24 4d 3e 09 6e 74 1b 00 00 00 00 00 86 04 8a")
+            analog = bytes.fromhex("24 4d 3e 09 6e 74 1b 00 d1 01 00 00 86 04 5a")
             variant = bytes.fromhex("24 4d 3e 04 02 42 54 46 4c 1a")
             firmware = bytes.fromhex("24 4d 3e 13 03 1a 0c 00 0f 32 30 32 36 2e 31 32 2e 30 2d 61 6c 70 68 61 65")
             again.sendall(packet(b"\0" + inner_status + analog + variant + firmware, channel=0, flags=0))
@@ -93,6 +93,7 @@ def main():
         assert output.count("STOCK backend connected") == 2, output
         assert 'msp=4 status=1 analog=1 malformed=0' in output, output
         assert 'variant="BTFL" firmware="2026.12.0-alpha" active=1 arm=0 pack_v=11.58 amps=0.00' in output, output
+        assert 'rc_source="RC RSSI" rc_pct=45' in output and 'rc_source="RC --" rc_pct=0' in output, output
         print(output)
         print("PASS: port exclusion, ACK, serial decoding without writes, partial-frame reconnect reset and freshness expiry")
     finally:

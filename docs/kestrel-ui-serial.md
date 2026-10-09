@@ -133,3 +133,46 @@ Fresh logs again reported BTFL / 2026.12.0-alpha, active STATUS/ANALOG decoding,
 `unknown=0 bad=0 malformed=0`, and approximately 11.5 V / 0 A / disarmed state.
 The independent decoder estimate remained approximately 60 fps. No further
 stock restore/reload was performed during this recovered session.
+
+## RC gauge follow-up
+
+The RC gauge originally used only `have_lq/lq_pct`, while the stock MSP adapter
+published `have_rssi/rssi_pct`. That left the gauge unfilled despite valid RSSI.
+A fresh passive capture contained this checksum-valid ANALOG envelope:
+
+```text
+00 24 4d 3e 09 6e 77 00 00 d1 01 00 00 a5 04 61
+```
+
+The RSSI field is `0x01d1` = 465 of 1023, rounded to **45%** by the existing
+decoder. The capture also contained vendor-batched DisplayPort warning text
+(`BATT < FULL`), but no LQ reading. The USB FC was not enumerated during this
+follow-up, so the positive RSSI evidence came from the actual radio/GUI feed.
+
+`Model::rc_signal()` now selects fresh, in-range LQ first, otherwise RSSI. It
+preserves the metric distinction: the gauge is labeled **RC LQ**, **RC RSSI**,
+or **RC --**. A genuine 0% LQ remains authoritative instead of falling back to
+a stronger RSSI. Stale, absent and out-of-range values do not fill the bar.
+The two gauge rows reserve enough caption width for the longer source label.
+SERIAL also shows the selected RC metric and percentage.
+
+Regression checks cover the captured RSSI value, source priority, genuine zero
+readings, stale/backwards timestamps and independent ANALOG expiry despite fresh
+STATUS. A framebuffer-level test verifies an RSSI-only rung lights at 45% and
+returns to its original unfilled color at 0%. Native and ASan/UBSan suites and
+socket integration checks passed, including the nonzero RC value through the
+real backend adapter and disappearance after disconnect.
+
+The Release build was hot-replaced inside the existing session, keeping the
+original stock-restore wrapper paused until the replacement UI eventually exits.
+This avoided running the stock framebuffer reload during the upgrade. The old
+UI exited with zero framebuffer readback mismatches; backend/radio PIDs stayed
+396/395. New UI PID 29445 loaded the unchanged KESTREL/60-Hz preferences and was
+left with the menu closed so the RC gauge is visible.
+
+Live logs confirmed `rc_source="RC RSSI"` with changing values of **46–47%**.
+A direct read of the visible framebuffer was downloaded and visually checked:
+the right RC track is approximately half filled, the **RC RSSI** caption is
+readable, and the separate VIDEO track remains intact. This is CPU overlay
+readback, not a capture of the underlying video plane. No FC setting, RF command,
+serial mode or media configuration was changed.

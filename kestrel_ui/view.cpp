@@ -256,13 +256,14 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
     }
     // Original two-track layout and labels. No FC flags, no invented readings.
     const char* battery_label = bf.have_pack_v && !bf.have_cell_v ? "PACK" : "CELL";
-    const float label_width = text_.design_advance(left ? battery_label : "VIDEO", canopy::kTextLabel);
+    const auto rc = model_.rc_signal(now_);
+    const float label_width = left ? text_.design_advance(battery_label, canopy::kTextLabel) :
+        std::max(text_.design_advance(rc.label(), canopy::kTextLabel), text_.design_advance("VIDEO", canopy::kTextLabel));
     const float start = 14 + label_width + 12;
-    text_.panel(layer, left ? battery_label : "RC", left, 14, 527, canopy::kTextLabel, !left, th.text, content);
+    text_.panel(layer, left ? battery_label : rc.label(), left, 14, 527, canopy::kTextLabel, !left, th.text, content);
     text_.panel(layer, left ? "SAG" : "VIDEO", left, 14, 537, canopy::kTextLabel, !left, th.accent, content);
     const float cell_level = bf.have_cell_v ? std::clamp((bf.cell_v - 3.3f) / 0.9f, 0.0f, 1.0f) : 0;
-    const float rc = bf.have_lq ? std::clamp(bf.lq_pct / 100.0f, 0.0f, 1.0f) : 0;
-    track(layer, left, start, 271, 525, 9, 20, left ? cell_level : rc, th.data, content);
+    track(layer, left, start, 271, 525, 9, 20, left ? cell_level : rc.level(), th.data, content);
     // Match Kestrel's seven-rung visual ladder; retain the raw MCS in the row.
     constexpr int ladder[] = {1, 2, 5, 7, 8, 10, 12};
     int rung = 0;

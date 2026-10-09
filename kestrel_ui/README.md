@@ -38,6 +38,8 @@ backend adapter.
 - SERIAL shows valid frames/bytes, decoded message counts, malformed/other MSP
   and separate opaque vendor notifications. Passive menu values refresh at 4 Hz;
   navigation remains immediate, and serial reception is not rate-limited.
+- RC gauge prefers fresh link quality, with a separately labeled **RC RSSI**
+  fallback for the stock MSP_ANALOG feed. Missing/stale RC data shows **RC --**.
 - Two-second telemetry expiry. A connected flag with invalid MCS is distinguished
   from a usable RF link; neither is treated as proof of decoded/displayed video.
 - Partial ARGB8888 framebuffer updates respecting stride, channel offsets and

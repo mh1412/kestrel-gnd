@@ -111,6 +111,31 @@ int main(int argc, char** argv) {
         serial.reset(); serial.receive(envelope(variant), 5700000); serial.publish(model, 5700000);
         check(!serial.buffered() && model.serial.variant == "BTFL" && !model.flight.have_pack_v,
               "Old partial frame cannot cross a backend reconnect");
+        // Captured during the RC-bar investigation: ANALOG RSSI = 0x01d1.
+        const auto rc_analog = hex("00 24 4d 3e 09 6e 77 00 00 d1 01 00 00 a5 04 61");
+        serial.receive(envelope(rc_analog), 5800000); serial.publish(model, 5800000);
+        check(model.flight.rssi_pct == 45 && !model.flight.have_lq &&
+              model.rc_signal(5800000).source == RcSource::Rssi && model.rc_signal(5800000).percent == 45,
+              "Actual stock RSSI supplies the RC bar without being mislabeled LQ");
+        model.flight.have_lq = true; model.flight.lq_pct = 94;
+        check(model.rc_signal(5800000).source == RcSource::LinkQuality && model.rc_signal(5800000).percent == 94,
+              "Actual link quality takes priority over RSSI");
+        model.flight.lq_pct = 0;
+        check(model.rc_signal(5800000).source == RcSource::LinkQuality && model.rc_signal(5800000).percent == 0,
+              "Zero LQ must not fall back to a stronger RSSI");
+        model.flight.lq_pct = 101;
+        check(model.rc_signal(5800000).source == RcSource::Rssi, "Invalid LQ does not mask valid RSSI");
+        model.flight.have_lq = false; model.flight.rssi_pct = 0;
+        check(model.rc_signal(5800000).source == RcSource::Rssi && model.rc_signal(5800000).percent == 0,
+              "Valid zero RSSI is distinct from unavailable data");
+        model.flight.rssi_pct = 101;
+        check(model.rc_signal(5800000).source == RcSource::Unavailable, "Out-of-range RSSI is not drawn");
+        serial.publish(model, 5800000);
+        check(model.rc_signal(5799999).source == RcSource::Unavailable &&
+              model.rc_signal(7800000).source == RcSource::Unavailable, "Backwards/stale RC readings are not drawn");
+        serial.receive(envelope(status), 7900000); serial.publish(model, 7900000);
+        check(model.rc_signal(7900000).source == RcSource::Unavailable,
+              "Fresh STATUS must not keep an expired RSSI bar filled");
         std::puts("PASS: captured MSP fixtures, stock fragmentation/coalescing, checksums, peer reset, independent field expiry and bounded recovery");
         return 0;
     } catch (const std::exception& e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }

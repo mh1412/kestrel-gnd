@@ -139,6 +139,36 @@ int main(int argc, char** argv) {
             model.key(kestrel_ui::Key::Down);
             now += 20000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
             if (view.menu_snapshots() == before_key) throw std::runtime_error("Serial snapshot throttling delayed a navigation key");
+            // Exercise the actual right-wing gauge with RSSI-only telemetry.
+            // Keep its source/label fixed so a pixel change proves that the
+            // filled rung changed, rather than just the caption.
+            model.menu_open = false; model.stage = kestrel_ui::MenuStage::Pick;
+            model.flight.have_lq = false; model.flight.have_rssi = true; model.flight.rssi_pct = 0;
+            for (int i = 0; i < 30; ++i) {
+                now += 20000; model.telemetry.stamp_us = now; model.flight.stamp_us = now;
+                model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            }
+            // Take a settled reference, independently of the preceding link
+            // acquisition/menu damage, before comparing the RSSI rung itself.
+            lv_obj_invalidate(lv_screen_active()); lv_refr_now(display.lv_display());
+            kestrel_ui::FontAtlas font(std::string(argv[1]) + "/canopy-font.kuf");
+            const auto frame = canopy::screen_frame(1920, 1080);
+            const float label = std::max(font.advance("RC RSSI"), font.advance("VIDEO")) *
+                canopy::kTextLabel / (canopy::kTextCellHeight * frame.UX);
+            const float start = 14 + label + 12;
+            const float pitch = (271 - start) / (20 * (1 - 0.32f / 2));
+            float cursor = start;
+            for (int i = 0; i < 2; ++i) cursor += pitch * (1 - 0.32f * i / 19);
+            const float factor = 1 - 0.32f * 2 / 19;
+            const auto point = canopy::project(1920, 1080, false, cursor + pitch * factor * 5 / 13, 525 - 4.5f * factor);
+            const size_t pixel = size_t(std::lround(point.y)) * 1920 + size_t(std::lround(point.x));
+            const auto empty_rung = display.pixels()[pixel];
+            model.flight.rssi_pct = 45; ++model.flight_version;
+            model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            if (display.pixels()[pixel] == empty_rung) throw std::runtime_error("RSSI-only telemetry did not fill the RC gauge");
+            model.flight.rssi_pct = 0; ++model.flight_version;
+            model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            if (display.pixels()[pixel] != empty_rung) throw std::runtime_error("RC gauge did not empty when RSSI fell to zero");
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

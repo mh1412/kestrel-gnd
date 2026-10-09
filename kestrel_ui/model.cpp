@@ -52,6 +52,16 @@ std::string Model::status(uint64_t now) const {
     if (telemetry.mcs < 0) return "LINK UP / NO VALID MCS";
     return "RF CONNECTED / VIDEO UNVERIFIED";
 }
+RcSignal Model::rc_signal(uint64_t now) const {
+    if (!flight.stamp_us || now < flight.stamp_us || now - flight.stamp_us >= 2000000) return {};
+    // RSSI is signal strength, not packet delivery quality. Keep the source
+    // distinct and prefer real LQ when a backend supplies it, including 0% LQ.
+    if (flight.have_lq && flight.lq_pct >= 0 && flight.lq_pct <= 100)
+        return {RcSource::LinkQuality, flight.lq_pct};
+    if (flight.have_rssi && flight.rssi_pct >= 0 && flight.rssi_pct <= 100)
+        return {RcSource::Rssi, flight.rssi_pct};
+    return {};
+}
 const char* Model::tab_name(int t) {
     static const char* names[] = {"RADIO", "HUD", "SYSTEM", "DISPLAY", "INPUT", "INFO", "SERIAL"};
     return names[t >= 0 && t < 7 ? t : 0];
@@ -108,6 +118,9 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         reading("msp_last", "Last MSP", std::string(msp_name(serial.last_function)) + " (" + std::to_string(serial.last_function) + ")", "Last checksum-validated MSP function. Other valid functions remain counted without guessing their payload semantics."),
         reading("msp_status", "Status messages", std::to_string(serial.status_frames), "MSP_STATUS/STATUS_EX flight mode flags, including the Betaflight BOXARM bit."),
         reading("msp_analog", "Analog messages", std::to_string(serial.analog_frames), "MSP_ANALOG pack voltage, current and RSSI. Pack voltage is not divided by an assumed cell count."),
+        reading("rc_signal", "RC indicator", rc_signal(now).source == RcSource::Unavailable ? "Unavailable" :
+            std::string(rc_signal(now).label()) + " " + std::to_string(rc_signal(now).percent) + "%",
+            "The RC bar prefers actual LQ, otherwise fresh MSP_ANALOG RSSI. RSSI is not relabeled as LQ; stale or unavailable data leaves the bar unfilled."),
         reading("msp_bad", "Malformed MSP", std::to_string(serial.malformed), "Bad direction, length, checksum or decoded payload. Invalid packets never supply flight readings."),
         reading("msp_other", "Other MSP", std::to_string(serial.unhandled), "Valid MSP functions whose data is not decoded yet, including DisplayPort grid messages."),
         reading("vendor_serial", "Vendor notifications", std::to_string(serial.vendor_notifications), "Separate channel-0 prefix-1 stock sky notifications. Contents remain opaque and are not parsed as MSP."),

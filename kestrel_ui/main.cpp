@@ -195,7 +195,8 @@ int main(int argc, char** argv) {
                     const auto& serial = model.serial;
                     if (serial.envelopes || serial.vendor_notifications) {
                         const auto& flight = model.flight;
-                        std::printf("SERIAL envelopes=%llu bytes=%llu msp=%llu status=%llu analog=%llu malformed=%llu discarded=%llu other=%llu requests=%llu errors=%llu vendor=%llu variant=\"%s\" firmware=\"%s\" active=%d arm=%d pack_v=%.2f amps=%.2f\n",
+                        const auto rc = model.rc_signal(now);
+                        std::printf("SERIAL envelopes=%llu bytes=%llu msp=%llu status=%llu analog=%llu malformed=%llu discarded=%llu other=%llu requests=%llu errors=%llu vendor=%llu variant=\"%s\" firmware=\"%s\" active=%d arm=%d pack_v=%.2f amps=%.2f rc_source=\"%s\" rc_pct=%d\n",
                             (unsigned long long)serial.envelopes, (unsigned long long)serial.bytes,
                             (unsigned long long)serial.frames, (unsigned long long)serial.status_frames,
                             (unsigned long long)serial.analog_frames, (unsigned long long)serial.malformed,
@@ -203,7 +204,7 @@ int main(int argc, char** argv) {
                             (unsigned long long)serial.requests, (unsigned long long)serial.errors,
                             (unsigned long long)serial.vendor_notifications, serial.variant.c_str(), serial.firmware.c_str(),
                             serial.fresh(now), flight.arm, flight.have_pack_v ? flight.pack_v : -1.0f,
-                            flight.have_amps ? flight.amps : -1.0f);
+                            flight.have_amps ? flight.amps : -1.0f, rc.label(), rc.percent);
                     }
                     next_log = now + 2000000;
                 }

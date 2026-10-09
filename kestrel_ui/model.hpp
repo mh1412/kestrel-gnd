@@ -27,6 +27,16 @@ struct SerialTelemetry {
     bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < 2000000; }
 };
 
+enum class RcSource { Unavailable, LinkQuality, Rssi };
+struct RcSignal {
+    RcSource source = RcSource::Unavailable;
+    int percent = 0;
+    const char* label() const {
+        return source == RcSource::LinkQuality ? "RC LQ" : source == RcSource::Rssi ? "RC RSSI" : "RC --";
+    }
+    float level() const { return percent / 100.0f; }
+};
+
 enum class Key { Menu, Up, Down, Left, Right, Enter, Back, Quit };
 enum class MenuStage { Pick, Browse, Edit };
 struct UiPreferences {
@@ -71,6 +81,7 @@ public:
     std::string selected_help(uint64_t now) const;
     int option_index() const;
     std::string status(uint64_t now) const;
+    RcSignal rc_signal(uint64_t now) const;
     std::vector<MenuRow> rows(uint64_t now) const;
     static const char* tab_name(int tab);
 private:
