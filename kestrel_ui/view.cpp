@@ -302,11 +302,14 @@ void View::draw_picker(lv_layer_t* layer) {
     }
 }
 lv_area_t View::menu_reveal(float progress) const {
-    const float e = progress * progress * (3 - 2 * progress);
-    const int folded_y = assets_[active_menu_side_].y;
-    const int y = int(folded_y + (height_ * 6 / 100 - folded_y) * e);
+    // Ease all the way to an empty strip at the blade's lower edge. Ending at
+    // the canopy asset's top left a large rectangle to disappear when hidden.
+    // Quintic easing also makes the last 50-Hz pose only a few pixels tall.
+    const float p = std::clamp(progress, 0.0f, 1.0f);
+    const float e = std::clamp(p * p * p * (p * (p * 6 - 15) + 10), 0.0f, 1.0f);
+    const int h = int(std::lround((height_ * 92 / 100) * e));
+    const int y = height_ * 6 / 100 + height_ * 92 / 100 - h;
     const int w = int(width_ * 0.31f + (lv_obj_get_width(menu_) - width_ * 0.31f) * e);
-    const int h = int((height_ - folded_y) * (1 - e) + (height_ * 92 / 100) * e);
     const int x = active_menu_side_ ? width_ - w : 0;
     return {x, y, x + w - 1, y + h - 1};
 }
@@ -318,6 +321,7 @@ void View::draw_menu(lv_layer_t* layer) {
     const float u = height_ / 1080.0f;
     const int pad = int(22 * u), row_h = int(50 * u);
     const auto reveal = menu_reveal(menu_progress_);
+    if (reveal.x1 > reveal.x2 || reveal.y1 > reveal.y2) return;
     const int backdrop_x = reveal.x1, backdrop_y = reveal.y1;
     const int backdrop_w = reveal.x2 - reveal.x1 + 1, backdrop_h = reveal.y2 - reveal.y1 + 1;
     if (!capturing_menu_ && menu_snapshot_) {

@@ -93,3 +93,29 @@ p95 still exceeds a 50-Hz frame budget. The 122-ms outlier shows cold/menu-side
 work remains visible. First-time preparation, telemetry changes and vendor
 scheduling still need profiling. HDMI tearing and perceived smoothness require
 user observation; rendering cost and decoder FPS alone cannot establish them.
+
+## Closing endpoint follow-up
+
+The user confirmed the cached-plane build was **“much smoother”**, but reported
+that the last portion of the closing menu disappeared in one frame. The reveal
+geometry still ended at the canopy asset's top, leaving a substantial rectangle
+when progress reached zero; hiding the object then removed that rectangle at once.
+
+The reveal now shrinks to **zero height at the menu's lower edge**, using quintic
+easing so the final 50-Hz pose is only a few pixels tall. The stationary snapshot
+and incremental edge-strip updates are retained. Empty reveal rectangles are
+explicitly skipped by the draw callback.
+
+A pixel-based regression reproduced the old failure before the fix. On both
+sides it now checks monotonic shrinkage, reaching zero height, and discarding no
+more than eight rows at the final 20-ms step. Incremental/full-redraw equivalence
+still passes throughout closure, as do native and ASan/UBSan core/render suites.
+
+The updated static executable was deployed with the same VIOLET/50-Hz settings.
+Eight GOGGLE and four AIR UNIT open/fold cycles, followed by closing the picker,
+gave an on-screen recent average of **6.26 ms**, p95 **38.09 ms**, and maximum
+**115.00 ms**. Of 285 animation ticks, 282 painted; near-zero quantized reveals
+can produce no damage. The decoder stayed near 60 fps (660 decoded frames across
+the approximately 11-second exercise). Normal exit again verified 2,073,600
+framebuffer pixels with **zero mismatches**, and the verified build was relaunched
+as the ongoing runtime session. Perceived endpoint behavior awaits user feedback.

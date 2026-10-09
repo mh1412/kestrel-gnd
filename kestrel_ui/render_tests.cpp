@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
                 const uint32_t expected = 0xff000000u | uint32_t(uint8_t(ground[0] * 255)) << 16 |
                     uint32_t(uint8_t(ground[1] * 255)) << 8 | uint8_t(ground[2] * 255);
                 const int x = side ? 1915 : 4;
-                if (display.pixels()[size_t(800) * 1920 + x] != expected)
+                if (display.pixels()[size_t(900) * 1920 + x] != expected)
                     throw std::runtime_error("Cached blade was empty, translucent or positioned on the wrong side");
                 for (int i = 0; i < 8; ++i) {
                     now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
@@ -102,10 +102,25 @@ int main(int argc, char** argv) {
                 now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
                 if (view.menu_snapshots() != closing) throw std::runtime_error("Closing blade replaced its outgoing snapshot");
                 check_incremental();
-                for (int i = 0; i < 8; ++i) {
-                    now += 40000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+                auto menu_column_height = [&]() {
+                    int count = 0;
+                    for (int y = 0; y < 1080; ++y) if (display.pixels()[size_t(y) * 1920 + x] == expected) ++count;
+                    return count;
+                };
+                int previous_height = menu_column_height();
+                bool fully_closed = false;
+                for (int i = 0; i < 16; ++i) {
+                    now += 20000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
                     check_incremental();
+                    const int height = menu_column_height();
+                    if (height > previous_height) throw std::runtime_error("Closing menu grew instead of shrinking");
+                    if (!fully_closed && height == 0) {
+                        if (previous_height > 8) throw std::runtime_error("Closing menu discarded a visible strip in its last frame");
+                        fully_closed = true;
+                    }
+                    previous_height = height;
                 }
+                if (!fully_closed) throw std::runtime_error("Closing menu never reached zero height");
             }
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
