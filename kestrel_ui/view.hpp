@@ -43,6 +43,7 @@ private:
     lv_draw_buf_t* menu_snapshot_ = nullptr;
     std::string menu_snapshot_signature_;
     uint64_t menu_snapshot_count_ = 0;
+    uint64_t menu_snapshot_checked_us_ = 0;
     uint64_t last_tick_ = 0;
     lv_obj_t *screen_ = nullptr, *panels_[2]{}, *status_ = nullptr, *menu_ = nullptr, *picker_ = nullptr;
     Asset assets_[2];

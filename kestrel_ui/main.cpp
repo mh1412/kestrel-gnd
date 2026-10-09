@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
             while (!stop && !model.quit) {
                 const uint64_t now = kestrel_ui::monotonic_us();
                 if (o.seconds && now - started >= uint64_t(o.seconds) * 1000000) break;
-                if (backend) backend->poll(model.telemetry, now);
+                if (backend) backend->poll(model, now);
                 else if (now / 400000 != demo_tick) {
                     demo_tick = now / 400000;
                     auto& t = model.telemetry;
@@ -191,6 +191,19 @@ int main(int argc, char** argv) {
                                     (unsigned long long)animated_ticks, (unsigned long long)animated_paints,
                                     (unsigned long long)(sum / sorted.size()),
                                     (unsigned long long)sorted[(sorted.size() - 1) * 95 / 100], (unsigned long long)sorted.back());
+                    }
+                    const auto& serial = model.serial;
+                    if (serial.envelopes || serial.vendor_notifications) {
+                        const auto& flight = model.flight;
+                        std::printf("SERIAL envelopes=%llu bytes=%llu msp=%llu status=%llu analog=%llu malformed=%llu discarded=%llu other=%llu requests=%llu errors=%llu vendor=%llu variant=\"%s\" firmware=\"%s\" active=%d arm=%d pack_v=%.2f amps=%.2f\n",
+                            (unsigned long long)serial.envelopes, (unsigned long long)serial.bytes,
+                            (unsigned long long)serial.frames, (unsigned long long)serial.status_frames,
+                            (unsigned long long)serial.analog_frames, (unsigned long long)serial.malformed,
+                            (unsigned long long)serial.discarded_bytes, (unsigned long long)serial.unhandled,
+                            (unsigned long long)serial.requests, (unsigned long long)serial.errors,
+                            (unsigned long long)serial.vendor_notifications, serial.variant.c_str(), serial.firmware.c_str(),
+                            serial.fresh(now), flight.arm, flight.have_pack_v ? flight.pack_v : -1.0f,
+                            flight.have_amps ? flight.amps : -1.0f);
                     }
                     next_log = now + 2000000;
                 }

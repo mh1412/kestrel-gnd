@@ -122,6 +122,23 @@ int main(int argc, char** argv) {
                 }
                 if (!fully_closed) throw std::runtime_error("Closing menu never reached zero height");
             }
+            // A high-rate MSP feed must not rebuild a large SERIAL snapshot at
+            // every packet. Passive values are sampled; keys remain immediate.
+            model.menu_open = true; model.side = 1; model.tab = 6; model.stage = kestrel_ui::MenuStage::Browse;
+            for (int i = 0; i < 16; ++i) {
+                now += 20000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            }
+            const auto serial_warm = view.menu_snapshots();
+            for (int i = 0; i < 50; ++i) {
+                now += 20000; model.serial.stamp_us = now; ++model.serial.frames; model.serial.bytes += 34;
+                model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            }
+            if (view.menu_snapshots() - serial_warm > 5 || view.menu_snapshots() == serial_warm)
+                throw std::runtime_error("SERIAL counters did not refresh at a bounded rate");
+            const auto before_key = view.menu_snapshots();
+            model.key(kestrel_ui::Key::Down);
+            now += 20000; model.tick(now); view.update(now); lv_refr_now(display.lv_display());
+            if (view.menu_snapshots() == before_key) throw std::runtime_error("Serial snapshot throttling delayed a navigation key");
             std::printf("PASS: 240 frames, menu motion/tabs/themes, text LRU lifetime, stable-cache reuse; bytes=%zu rasters=%llu\n",
                         view.text_cache_bytes(), (unsigned long long)view.text_rasterizations());
         }

@@ -64,12 +64,25 @@ def main():
             corrupt = bytearray(wire)
             corrupt[2] ^= 1
             connection.sendall(corrupt + packet(b"unvalidated", channel=0, flags=0) + packet(body, flags=0))
+            # Leave an incomplete inner MSP frame at the first disconnect.
+            inner_status = bytes.fromhex("24 4d 3e 1b 65 7c 00 00 00 23 00 00 00 00 00 00 19 00 00 00 00 1e 04 01 00 00 00 20 00 04 03 00 04")
+            connection.sendall(packet(b"\0" + inner_status[:9], channel=0, flags=0))
             time.sleep(0.1)
         # Verify a new backend can reconnect without restarting the UI.
         time.sleep(0.1)
         with socket.create_connection(("127.0.0.1", port), timeout=1) as again:
-            again.sendall(packet(body, flags=0))
-            time.sleep(0.1)
+            # The old partial frame must not contaminate this new stream.
+            again.sendall(packet(body, flags=0) + packet(b"\0" + inner_status[9:], channel=0, flags=0))
+            analog = bytes.fromhex("24 4d 3e 09 6e 74 1b 00 00 00 00 00 86 04 8a")
+            variant = bytes.fromhex("24 4d 3e 04 02 42 54 46 4c 1a")
+            firmware = bytes.fromhex("24 4d 3e 13 03 1a 0c 00 0f 32 30 32 36 2e 31 32 2e 30 2d 61 6c 70 68 61 65")
+            again.sendall(packet(b"\0" + inner_status + analog + variant + firmware, channel=0, flags=0))
+            again.settimeout(0.1)
+            try:
+                assert not again.recv(1), "Serial decoder sent an unsolicited request"
+            except socket.timeout:
+                pass
+            time.sleep(2.1)  # Keep peer alive through the first serial log.
         process.stdin.write("md\n")
         process.stdin.flush()
         output, error = process.communicate(timeout=8)
@@ -78,8 +91,10 @@ def main():
         assert "unknown=1 bad=1" in output, output
         assert 'state="BACKEND STALE"' in output, output
         assert output.count("STOCK backend connected") == 2, output
+        assert 'msp=4 status=1 analog=1 malformed=0' in output, output
+        assert 'variant="BTFL" firmware="2026.12.0-alpha" active=1 arm=0 pack_v=11.58 amps=0.00' in output, output
         print(output)
-        print("PASS: port exclusion, fragmented/coalesced traffic, ACK, corrupt/unknown packets, reconnect and freshness expiry")
+        print("PASS: port exclusion, ACK, serial decoding without writes, partial-frame reconnect reset and freshness expiry")
     finally:
         if process.poll() is None:
             process.terminate()

@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "stock_serial.hpp"
 #include "hud_theme.hpp"
 #include <cctype>
 #include <ctime>
@@ -76,7 +77,9 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
         return {choice("theme", "Theme", theme, std::move(themes), "Preview the canopy colors. OK applies; BACK restores the original theme."),
             choice("details", "Detail rows", show_details ? 1 : 0, {"OFF", "ON"}, "Show the aircraft/receiver detail rows beneath the canopy gauges."),
             reading("renderer", "Renderer", "CPU perspective", "Chakra Petch text projected onto the original canopy panel geometry, cached as alpha masks."),
-            reading("flight", "Aircraft telemetry", flight.stamp_us ? "Received" : "Unavailable", "Live MSP forwarding is not yet validated. Unavailable flight values remain blank.")};
+            reading("flight", "Aircraft telemetry", !flight.stamp_us ? "Unavailable" :
+                (now >= flight.stamp_us && now - flight.stamp_us < 2000000 ? "Received" : "Stale"),
+                "Validated MSP STATUS supplies arm state; ANALOG supplies pack voltage/current. Each expires independently. No cell count or flight mode is guessed.")};
     }
     if (tab == 3) {
         std::vector<std::string> options;
@@ -96,9 +99,21 @@ std::vector<MenuRow> Model::rows(uint64_t now) const {
     if (tab == 5) return {reading("backend", "Receiver backend", "ar_ldy_gnd", "Stock backend supplies RF/media and normalized GUI status."),
         reading("layout", "Status payload", value(int(telemetry.status_payload_bytes), fresh) + " bytes", "Known 17.5.3/18.21.10 layouts are decoded; unknown extensions are not guessed."),
         reading("capabilities", "Control writes", "Not enabled", "Only local UI settings are editable at this stage.")};
-    if (tab == 6) return {reading("notifications", "Unmapped messages", std::to_string(telemetry.unknown_frames), "Stock serial/MSP notifications are counted but not interpreted as validated FC data."),
+    if (tab == 6) return {
+        reading("serial_feed", "MSP feed", serial.fresh(now) ? "Active" : serial.frames ? "Stale" : "Waiting", "Checksum-validated MSP v1/native v2 from the stock forwarding feed. Receiving packets does not imply arming or a valid video stream."),
+        reading("fc_variant", "Flight controller", serial.variant.empty() ? "--" : serial.variant, "MSP_FC_VARIANT supplied by the flight controller, for example BTFL = Betaflight."),
+        reading("fc_firmware", "FC firmware", serial.firmware.empty() ? "--" : serial.firmware, "MSP_FC_VERSION, including the captured length-prefixed Betaflight version string when present."),
+        reading("msp_frames", "MSP frames", std::to_string(serial.frames), "Validated complete MSP frames, including requests/errors counted separately. One stock envelope can contain multiple frames or a partial frame."),
+        reading("serial_bytes", "Serial bytes", std::to_string(serial.bytes), "Forwarded serial bytes excluding the stock envelope's one-byte prefix. The UI never opens the physical UART."),
+        reading("msp_last", "Last MSP", std::string(msp_name(serial.last_function)) + " (" + std::to_string(serial.last_function) + ")", "Last checksum-validated MSP function. Other valid functions remain counted without guessing their payload semantics."),
+        reading("msp_status", "Status messages", std::to_string(serial.status_frames), "MSP_STATUS/STATUS_EX flight mode flags, including the Betaflight BOXARM bit."),
+        reading("msp_analog", "Analog messages", std::to_string(serial.analog_frames), "MSP_ANALOG pack voltage, current and RSSI. Pack voltage is not divided by an assumed cell count."),
+        reading("msp_bad", "Malformed MSP", std::to_string(serial.malformed), "Bad direction, length, checksum or decoded payload. Invalid packets never supply flight readings."),
+        reading("msp_other", "Other MSP", std::to_string(serial.unhandled), "Valid MSP functions whose data is not decoded yet, including DisplayPort grid messages."),
+        reading("vendor_serial", "Vendor notifications", std::to_string(serial.vendor_notifications), "Separate channel-0 prefix-1 stock sky notifications. Contents remain opaque and are not parsed as MSP."),
+        reading("notifications", "Unmapped messages", std::to_string(telemetry.unknown_frames), "Other stock envelope types whose framing or routing is not mapped. Valid serial/MSP envelopes are counted above instead."),
         reading("serial_owner", "VRX UART", "Stock backend", "KestrelUI does not open or reconfigure the backend-owned ttyS4 serial port."),
-        reading("fc", "FC decoding", "Pending integration", "No invented flight-controller measurements or arm state.")};
+        reading("fc", "FC polling", "Receive-only", "No MSP requests, UART-mode changes or backend control writes are sent.")};
     return {reading("voltage", "Receiver voltage", fresh && telemetry.voltage_mv > 0 ? std::to_string(telemetry.voltage_mv) + " mV" : "--", "Fitted stock supply-voltage measurement."),
         reading("cpu", "CPU temperature", fresh ? std::to_string(telemetry.cpu_temperature_x100 / 100.0f) + " C" : "--", "Receiver CPU temperature, not air-unit temperature."),
         reading("rf_temperature", "RF temperature (raw)", value(telemetry.rf_temperature_raw, fresh), "Raw stock RF-board temperature field."),

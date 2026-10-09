@@ -1,5 +1,5 @@
 #pragma once
-#include "stock_protocol.hpp"
+#include "stock_serial.hpp"
 #include <deque>
 
 namespace kestrel_ui {
@@ -11,10 +11,11 @@ public:
     ~StockBackend();
     StockBackend(const StockBackend&) = delete;
     StockBackend& operator=(const StockBackend&) = delete;
-    void poll(Telemetry& state, uint64_t now);
+    void poll(Model& model, uint64_t now);
 private:
     int listener_ = -1, client_ = -1;
     StockParser parser_;
+    StockSerial serial_;
     std::deque<uint8_t> replies_;
     void disconnect();
 };

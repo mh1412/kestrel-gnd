@@ -89,6 +89,12 @@ void View::drop_menu_snapshot() {
     lv_draw_buf_destroy(menu_snapshot_); menu_snapshot_ = nullptr;
 }
 void View::prepare_menu_snapshot() {
+    // Live serial counters can change forty times a second. Sample passive
+    // content at 4 Hz; button/selection/theme changes still refresh immediately.
+    if (menu_snapshot_ && menu_version_ == model_.menu_version && old_tab_ == model_.tab &&
+        old_selected_ == model_.selected && old_theme_ == model_.theme && now_ >= menu_snapshot_checked_us_ &&
+        now_ - menu_snapshot_checked_us_ < 250000) return;
+    menu_snapshot_checked_us_ = now_;
     // Pre-render the likely blade while picking, before its animation begins.
     // This is UI-thread-only and restores the controller's public state; no
     // key, command, preference or backend callback is invoked.
@@ -249,9 +255,10 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
         }
     }
     // Original two-track layout and labels. No FC flags, no invented readings.
-    const float label_width = text_.design_advance(left ? "CELL" : "VIDEO", canopy::kTextLabel);
+    const char* battery_label = bf.have_pack_v && !bf.have_cell_v ? "PACK" : "CELL";
+    const float label_width = text_.design_advance(left ? battery_label : "VIDEO", canopy::kTextLabel);
     const float start = 14 + label_width + 12;
-    text_.panel(layer, left ? "CELL" : "RC", left, 14, 527, canopy::kTextLabel, !left, th.text, content);
+    text_.panel(layer, left ? battery_label : "RC", left, 14, 527, canopy::kTextLabel, !left, th.text, content);
     text_.panel(layer, left ? "SAG" : "VIDEO", left, 14, 537, canopy::kTextLabel, !left, th.accent, content);
     const float cell_level = bf.have_cell_v ? std::clamp((bf.cell_v - 3.3f) / 0.9f, 0.0f, 1.0f) : 0;
     const float rc = bf.have_lq ? std::clamp(bf.lq_pct / 100.0f, 0.0f, 1.0f) : 0;
@@ -450,7 +457,7 @@ void View::update(uint64_t now) {
     const bool counters = t.status_frames != presented_.status_frames || t.unknown_frames != presented_.unknown_frames ||
                           t.bad_frames != presented_.bad_frames || model_.rejected_inputs != rejected_inputs_;
     if (appearance || (!moving && menu) || (moving && next == 0) ||
-        (!moving && (data || (model_.menu_open && (model_.tab == 2 || model_.tab == 4) && counters))))
+        (!moving && !menu_snapshot_ && (data || (model_.menu_open && (model_.tab == 2 || model_.tab == 4 || model_.tab == 6) && counters))))
         lv_obj_invalidate(menu_);
     else if (moving) {
         // The cached plane is stationary: pixels shared by the two reveals

@@ -32,9 +32,10 @@ StockBackend::StockBackend(int port) {
 StockBackend::~StockBackend() { disconnect(); if (listener_ >= 0) close(listener_); }
 void StockBackend::disconnect() {
     if (client_ >= 0) close(client_);
-    client_ = -1; parser_.reset(); replies_.clear();
+    client_ = -1; parser_.reset(); serial_.reset(); replies_.clear();
 }
-void StockBackend::poll(Telemetry& state, uint64_t now) {
+void StockBackend::poll(Model& model, uint64_t now) {
+    auto& state = model.telemetry;
     // Accept at most one extra connection each tick; never let a connection
     // flood starve rendering. The already connected backend remains owner.
     int incoming = accept4(listener_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -42,7 +43,7 @@ void StockBackend::poll(Telemetry& state, uint64_t now) {
         if (client_ >= 0) close(incoming);
         else { client_ = incoming; std::puts("STOCK backend connected"); }
     }
-    if (client_ < 0) return;
+    if (client_ < 0) { serial_.publish(model, now); return; }
     uint8_t data[4096];
     for (int reads = 0; reads < 8; ++reads) {
         const ssize_t n = recv(client_, data, sizeof(data), 0);
@@ -52,14 +53,13 @@ void StockBackend::poll(Telemetry& state, uint64_t now) {
             break;
         }
         parser_.feed(data, size_t(n), [&](const StockFrame& f) {
-            if (!stock_status(f, state, now)) {
+            if (!stock_status(f, state, now) && !serial_.receive(f, now)) {
                 ++state.unknown_frames;
                 if (state.unknown_frames <= 8)
                     std::printf("STOCK unmapped channel=%u flags=0x%02x length=%zu subtype=%u\n",
                                 f.channel, f.flags, f.payload.size(), f.payload.empty() ? 0 : f.payload[0]);
             }
-            // Protocol-level ACK only. Do not interpret unvalidated config/MSP
-            // frames or respond with fabricated application results.
+            // Protocol-level ACK only; no MSP polling or application writes.
             if (f.flags & 0x80) {
                 auto reply = stock_packet({f.sequence, f.channel, uint8_t(f.flags & 0x7f), {}});
                 if (replies_.size() + reply.size() <= 4096) replies_.insert(replies_.end(), reply.begin(), reply.end());
@@ -67,6 +67,7 @@ void StockBackend::poll(Telemetry& state, uint64_t now) {
         });
     }
     state.bad_frames = parser_.rejected;
+    serial_.publish(model, now);
     if (client_ < 0 || replies_.empty()) return;
     std::vector<uint8_t> out(replies_.begin(), replies_.end());
     const ssize_t sent = send(client_, out.data(), out.size(), MSG_NOSIGNAL);

@@ -32,6 +32,12 @@ backend adapter.
   Bounded frame parsing, checksum validation, reconnect handling and protocol ACKs.
 - Verified status layouts: 201-byte payloads from 17.5.3 and 297-byte payloads
   from 18.21.10. Only verified common fields are decoded.
+- Validated stock channel-0 serial forwarding with streaming MSP v1/native v2
+  checksum checks. FC type/version, STATUS arm state and ANALOG pack voltage,
+  current/RSSI are decoded; measurements expire independently after two seconds.
+- SERIAL shows valid frames/bytes, decoded message counts, malformed/other MSP
+  and separate opaque vendor notifications. Passive menu values refresh at 4 Hz;
+  navigation remains immediate, and serial reception is not rate-limited.
 - Two-second telemetry expiry. A connected flag with invalid MCS is distinguished
   from a usable RF link; neither is treated as proof of decoded/displayed video.
 - Partial ARGB8888 framebuffer updates respecting stride, channel offsets and
@@ -47,9 +53,11 @@ themes and link transitions have been extracted first. The standalone controller
 now follows the original canopy menu flow, but backend-owned actions and all
 original menu rows remain to be ported.
 
-Live aircraft telemetry, Betaflight grid/glyph rendering, arm/disarm wipe animations,
-reactive motion, gallery/playback and DVR controls are not wired up yet.
-Unknown stock notifications/MSP data are counted, not guessed. RF, camera and
+Additional aircraft telemetry, Betaflight grid/glyph rendering, arm/disarm wipe
+animations, reactive motion, gallery/playback and DVR controls remain to be wired up.
+Stock MSP STATUS/ANALOG now supply arm state and pack voltage/current; cell count,
+flight mode, timer and other unavailable readings are not inferred. Other valid
+MSP functions and opaque vendor notifications are counted separately. RF, camera and
 recording changes are not sent; the only outbound stock traffic is a framing ACK
 when requested. Theme, detail rows, UI cadence and arrow-repeat preferences are
 saved only to an explicitly supplied `--config` file; the device wrapper uses a
@@ -65,7 +73,7 @@ and typeface now match the original panel geometry; complete GPU effects,
 reactive HUD motion and all menu/controller features remain to be ported.
 The explicit `--demo` backend supplies synthetic flight readings through the
 original `BfTelem` structure to exercise big figures, unit baselines, arm/timer
-labels and gauges. The stock backend leaves those fields unavailable.
+labels and gauges. The stock backend supplies only the validated MSP fields.
 
 ## Structure
 
@@ -77,6 +85,7 @@ kestrel_ui/model.*           Graphics-free UI state and initial local menu
 kestrel_ui/input.*           Terminal/evdev/stock keys and local control socket
 kestrel_ui/preferences.*     Validated, atomic local UI-preference storage
 kestrel_ui/stock_protocol.*  Bounded stock GUI framing and telemetry decoder
+kestrel_ui/stock_serial.*    Receive-only stock envelope / streaming MSP decoder
 kestrel_ui/stock_backend.*   Nonblocking stock GUI server adapter
 kestrel_ui/display.*         Offscreen/fbdev CPU overlay presentation
 kestrel_ui/view.*            LVGL canopy view and menu
@@ -143,6 +152,9 @@ Projective tests cover asymmetric texture sampling, clipping, mirrored-text
 regressions, folded-quad rejection, inverse/forward consistency and glyph interiors
 against the 3D projection. Font tests cover metrics, kerning, Unicode fallback and
 malformed/truncated atlases.
+The serial suite includes captured FC messages, envelope fragmentation/coalescing,
+native MSP v2 CRC, signed current, malformed-frame recovery, disconnect reset,
+independent field expiry and no redraw for unchanged repeated STATUS packets.
 
 Register the 240-frame renderer/cache stress test using the generated 1080p assets:
 
@@ -160,6 +172,15 @@ The control integration test covers picker/section/edit navigation, CRLF,
 stock-key decoding, named IPC keys, apply/cancel, preference reload, active/stale
 socket ownership and interactive pseudo-terminal restoration. Q exits the
 keyboard client without terminating the receiver UI. Both run under ASan/UBSan.
+The socket test also verifies serial decoding through the actual backend adapter,
+discarding partial MSP frames across reconnection, and sending no unsolicited MSP
+requests. A reconstructed private GUI stream can be replayed without hardware:
+
+```sh
+build-ui/kestrel_ui/kestrel-ui-serial-tests --stream /path/to/gui-2765-stream.bin
+```
+
+See [serial protocol evidence and live validation](../docs/kestrel-ui-serial.md).
 
 For AddressSanitizer/UBSan:
 
@@ -303,7 +324,7 @@ see [implementation and device measurements](../docs/kestrel-ui-perspective.md).
    the stock decoder active.
 2. Extract more of the original OSD menu/controller and typography without GL
    dependencies, and implement the remaining 2D canopy transitions.
-3. Validate stock flight-controller forwarding and add existing MSP/glyph support.
+3. Extend the validated stock MSP forwarding with remaining telemetry/grid/glyph support.
 4. Add Ascent physical input and individually validated backend actions/readback.
 5. Split the Kestrel core's concrete OSD calls behind state/command interfaces,
    then add the Kestrel IPC adapter and independent Artosyn media/radio backend.

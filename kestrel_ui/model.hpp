@@ -18,6 +18,15 @@ struct Telemetry {
     bool link_valid(uint64_t now) const { return fresh(now) && connected && mcs >= 0; }
 };
 
+struct SerialTelemetry {
+    uint64_t stamp_us = 0, envelopes = 0, bytes = 0, frames = 0;
+    uint64_t malformed = 0, discarded_bytes = 0, requests = 0, errors = 0, unhandled = 0;
+    uint64_t status_frames = 0, analog_frames = 0, vendor_notifications = 0;
+    uint16_t last_function = 0;
+    std::string variant, firmware;
+    bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < 2000000; }
+};
+
 enum class Key { Menu, Up, Down, Left, Right, Enter, Back, Quit };
 enum class MenuStage { Pick, Browse, Edit };
 struct UiPreferences {
@@ -37,6 +46,7 @@ struct MenuRow {
 class Model {
 public:
     Telemetry telemetry;
+    SerialTelemetry serial;
     BfTelem flight; // Same have_* semantics as the original OSD; stock adapter does not invent FC data.
     uint64_t flight_version = 0;
     bool menu_open = false, quit = false;
