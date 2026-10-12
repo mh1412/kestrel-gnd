@@ -147,8 +147,9 @@ std::string Input::sources() const {
     if (udp_ >= 0) result += ", stock keys";
     return result;
 }
-void Input::poll(Model& model, uint64_t now) {
-    const KeySink sink = [&](Key k, bool repeated) { model.key(k, repeated); };
+void Input::poll(Controller& controller, uint64_t now) {
+    auto& model = controller.model();
+    const KeySink sink = [&](Key k, bool repeated) { controller.key(k, repeated); };
     char bytes[64];
     const ssize_t n = read(STDIN_FILENO, bytes, sizeof(bytes));
     if (n > 0) terminal_.feed(bytes, size_t(n), now, sink);
@@ -168,14 +169,14 @@ void Input::poll(Model& model, uint64_t now) {
             case KEY_Q: key = Key::Quit; break;
             default: continue;
         }
-        model.key(key, event.value == 2);
+        controller.key(key, event.value == 2);
     }
     for (int count = 0; udp_ >= 0 && count < 8; ++count) {
         uint8_t packet[4];
         const ssize_t size = recv(udp_, packet, sizeof(packet), MSG_TRUNC);
         if (size < 0) break;
         Key key; bool repeat;
-        if (stock_key(packet, size_t(size), key, repeat)) model.key(key, repeat);
+        if (stock_key(packet, size_t(size), key, repeat)) controller.key(key, repeat);
         else ++model.rejected_inputs;
     }
     for (int count = 0; control_ >= 0 && count < 8; ++count) {
@@ -188,7 +189,7 @@ void Input::poll(Model& model, uint64_t now) {
             const std::string command(data, size_t(size));
             Key key;
             if (command == "status") response = model.describe();
-            else if (parse_key(command, key)) { model.key(key); response = model.describe(); }
+            else if (parse_key(command, key)) { controller.key(key); response = model.describe(); }
             else ++model.rejected_inputs;
         } else ++model.rejected_inputs;
         if (length > offsetof(sockaddr_un, sun_path) && peer.sun_path[0])

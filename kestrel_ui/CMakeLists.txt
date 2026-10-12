@@ -18,7 +18,7 @@ else()
     endif()
 endif()
 
-add_library(kestrel-ui-core STATIC stock_protocol.cpp stock_serial.cpp stock_backend.cpp model.cpp font_atlas.cpp input.cpp preferences.cpp ../hud_theme.cpp)
+add_library(kestrel-ui-core STATIC stock_protocol.cpp stock_serial.cpp stock_backend.cpp model.cpp controller.cpp hud_data.cpp font_atlas.cpp input.cpp preferences.cpp ../hud_theme.cpp)
 target_include_directories(kestrel-ui-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 target_compile_options(kestrel-ui-core PRIVATE -Wall -Wextra -Wpedantic)
 

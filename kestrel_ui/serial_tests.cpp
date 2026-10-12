@@ -1,4 +1,5 @@
 #include "stock_serial.hpp"
+#include "model.hpp"
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -26,14 +27,14 @@ int main(int argc, char** argv) {
         if (argc == 3 && std::string(argv[1]) == "--stream") {
             std::ifstream in(argv[2], std::ios::binary);
             if (!in) throw std::runtime_error("Cannot open stock GUI stream");
-            StockParser parser; StockSerial serial; Model model;
+            StockParser parser; StockSerial serial; BackendState model;
             std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(in), {}};
             parser.feed(bytes.data(), bytes.size(), [&](const StockFrame& frame) {
-                if (!stock_status(frame, model.telemetry, 1000000) && !serial.receive(frame, 1000000)) ++model.telemetry.unknown_frames;
+                if (!stock_status(frame, model.vrx, 1000000) && !serial.receive(frame, 1000000)) ++model.vrx.unknown_frames;
             });
             serial.publish(model, 1000000);
             std::printf("REPLAY status=%llu unknown=%llu outer_bad=%llu serial=%llu msp=%llu status_msp=%llu analog=%llu malformed=%llu vendor=%llu variant=%s firmware=%s arm=%d pack_v=%.2f amps=%.2f remaining=%zu\n",
-                (unsigned long long)model.telemetry.status_frames, (unsigned long long)model.telemetry.unknown_frames,
+                (unsigned long long)model.vrx.status_frames, (unsigned long long)model.vrx.unknown_frames,
                 (unsigned long long)parser.rejected, (unsigned long long)model.serial.envelopes,
                 (unsigned long long)model.serial.frames, (unsigned long long)model.serial.status_frames,
                 (unsigned long long)model.serial.analog_frames, (unsigned long long)model.serial.malformed,
@@ -47,7 +48,7 @@ int main(int argc, char** argv) {
         const auto analog = hex("00 24 4d 3e 09 6e 74 1b 00 00 00 00 00 86 04 8a");
         const auto variant = hex("00 24 4d 3e 04 02 42 54 46 4c 1a");
         const auto version = hex("00 24 4d 3e 13 03 1a 0c 00 0f 32 30 32 36 2e 31 32 2e 30 2d 61 6c 70 68 61 65");
-        StockSerial serial; Model model;
+        StockSerial serial; Model ui; auto& model = ui.backend;
         check(!serial.receive({0, 1, 0, status}, 1000000), "Do not parse the wrong outer channel as MSP");
         check(!serial.receive({0, 0, 0, {2, '$', 'M'}}, 1000000), "Do not guess unknown stock prefixes");
         for (size_t i = 1; i < status.size(); ++i) {
@@ -115,26 +116,26 @@ int main(int argc, char** argv) {
         const auto rc_analog = hex("00 24 4d 3e 09 6e 77 00 00 d1 01 00 00 a5 04 61");
         serial.receive(envelope(rc_analog), 5800000); serial.publish(model, 5800000);
         check(model.flight.rssi_pct == 45 && !model.flight.have_lq &&
-              model.rc_signal(5800000).source == RcSource::Rssi && model.rc_signal(5800000).percent == 45,
+              ui.rc_signal(5800000).source == RcSource::Rssi && ui.rc_signal(5800000).percent == 45,
               "Actual stock RSSI supplies the RC bar without being mislabeled LQ");
         model.flight.have_lq = true; model.flight.lq_pct = 94;
-        check(model.rc_signal(5800000).source == RcSource::LinkQuality && model.rc_signal(5800000).percent == 94,
+        check(ui.rc_signal(5800000).source == RcSource::LinkQuality && ui.rc_signal(5800000).percent == 94,
               "Actual link quality takes priority over RSSI");
         model.flight.lq_pct = 0;
-        check(model.rc_signal(5800000).source == RcSource::LinkQuality && model.rc_signal(5800000).percent == 0,
+        check(ui.rc_signal(5800000).source == RcSource::LinkQuality && ui.rc_signal(5800000).percent == 0,
               "Zero LQ must not fall back to a stronger RSSI");
         model.flight.lq_pct = 101;
-        check(model.rc_signal(5800000).source == RcSource::Rssi, "Invalid LQ does not mask valid RSSI");
+        check(ui.rc_signal(5800000).source == RcSource::Rssi, "Invalid LQ does not mask valid RSSI");
         model.flight.have_lq = false; model.flight.rssi_pct = 0;
-        check(model.rc_signal(5800000).source == RcSource::Rssi && model.rc_signal(5800000).percent == 0,
+        check(ui.rc_signal(5800000).source == RcSource::Rssi && ui.rc_signal(5800000).percent == 0,
               "Valid zero RSSI is distinct from unavailable data");
         model.flight.rssi_pct = 101;
-        check(model.rc_signal(5800000).source == RcSource::Unavailable, "Out-of-range RSSI is not drawn");
+        check(ui.rc_signal(5800000).source == RcSource::Unavailable, "Out-of-range RSSI is not drawn");
         serial.publish(model, 5800000);
-        check(model.rc_signal(5799999).source == RcSource::Unavailable &&
-              model.rc_signal(7800000).source == RcSource::Unavailable, "Backwards/stale RC readings are not drawn");
+        check(ui.rc_signal(5799999).source == RcSource::Unavailable &&
+              ui.rc_signal(7800000).source == RcSource::Unavailable, "Backwards/stale RC readings are not drawn");
         serial.receive(envelope(status), 7900000); serial.publish(model, 7900000);
-        check(model.rc_signal(7900000).source == RcSource::Unavailable,
+        check(ui.rc_signal(7900000).source == RcSource::Unavailable,
               "Fresh STATUS must not keep an expired RSSI bar filled");
         std::puts("PASS: captured MSP fixtures, stock fragmentation/coalescing, checksums, peer reset, independent field expiry and bounded recovery");
         return 0;

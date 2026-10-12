@@ -7,7 +7,7 @@ namespace kestrel_ui {
 class StockSerial {
 public:
     bool receive(const StockFrame& frame, uint64_t now);
-    void publish(Model& model, uint64_t now) const;
+    void publish(BackendState& model, uint64_t now) const;
     void reset(); // Drop partial data/peer identity/measurements, retain counters.
     size_t buffered() const { return buffer_.size(); }
 private:

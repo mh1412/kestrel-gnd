@@ -44,7 +44,7 @@ void View::Asset::load(const std::string& path, int width, int height) {
     image.header.w = w; image.header.h = h; image.header.stride = w;
     image.data_size = pixels.size(); image.data = pixels.data();
 }
-View::View(Model& model, int w, int h, const std::string& assets)
+View::View(const Model& model, int w, int h, const std::string& assets)
     : model_(model), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h) {
     assets_[0].load(assets + "/canopy-left.kui", w, h);
     assets_[1].load(assets + "/canopy-right.kui", w, h);
@@ -95,21 +95,19 @@ void View::prepare_menu_snapshot() {
         old_selected_ == model_.selected && old_theme_ == model_.theme && now_ >= menu_snapshot_checked_us_ &&
         now_ - menu_snapshot_checked_us_ < 250000) return;
     menu_snapshot_checked_us_ = now_;
-    // Pre-render the likely blade while picking, before its animation begins.
-    // This is UI-thread-only and restores the controller's public state; no
-    // key, command, preference or backend callback is invoked.
-    const int saved_tab = model_.tab, saved_selected = model_.selected;
-    const auto saved_stage = model_.stage;
+    // Snapshot a derived preview. The View never mutates controller state.
+    menu_preview_ = model_;
     if (model_.stage == MenuStage::Pick) {
-        model_.tab = model_.remembered_section(); model_.selected = 0; model_.stage = MenuStage::Browse;
+        menu_preview_->tab = model_.remembered_section(); menu_preview_->selected = 0; menu_preview_->stage = MenuStage::Browse;
     }
+    const auto& menu = *menu_preview_;
     std::ostringstream signature;
-    signature << model_.side << ':' << model_.tab << ':' << model_.selected << ':' << model_.theme << ':'
-              << (model_.stage == MenuStage::Edit) << ':' << model_.selected_help(now_);
-    for (const auto& row : model_.rows(now_)) signature << '\n' << row.id << ':' << row.value;
+    signature << menu.side << ':' << menu.tab << ':' << menu.selected << ':' << menu.theme << ':'
+              << (menu.stage == MenuStage::Edit) << ':' << menu.selected_help(now_);
+    for (const auto& row : menu.rows(now_)) signature << '\n' << row.id << ':' << row.value;
     const std::string key = signature.str();
     if (menu_snapshot_ && key == menu_snapshot_signature_) {
-        model_.tab = saved_tab; model_.selected = saved_selected; model_.stage = saved_stage; return;
+        menu_preview_.reset(); return;
     }
     const float progress = menu_progress_;
     const int active_side = active_menu_side_;
@@ -120,7 +118,7 @@ void View::prepare_menu_snapshot() {
     // per-pixel source-alpha blend when copying its cached image to ARGB.
     menu_snapshot_ = lv_snapshot_take(menu_, LV_COLOR_FORMAT_XRGB8888);
     capturing_menu_ = false; menu_progress_ = progress; active_menu_side_ = active_side;
-    model_.tab = saved_tab; model_.selected = saved_selected; model_.stage = saved_stage;
+    menu_preview_.reset();
     lv_obj_set_pos(menu_, active_side ? width_ - lv_obj_get_width(menu_) : 0, height_ * 6 / 100);
     if (menu_snapshot_) {
         menu_snapshot_signature_ = key; ++menu_snapshot_count_;
@@ -171,9 +169,9 @@ void View::draw_panel(lv_layer_t* layer, bool left) {
     // pass over the same large area on every animation frame.
     if ((left ? 0 : 1) == active_menu_side_ && menu_progress_ > 0) return;
     const auto& th = hud_theme_at(model_.theme);
-    const auto& t = model_.telemetry;
+    const auto& t = model_.backend.vrx;
     const bool picked = model_.menu_open && model_.stage == MenuStage::Pick && model_.side == (left ? 0 : 1);
-    const auto& bf = model_.flight;
+    const auto& bf = model_.backend.flight;
     const bool flight_fresh = bf.stamp_us && now_ >= bf.stamp_us && now_ - bf.stamp_us < 2000000;
     const auto& a = assets_[left ? 0 : 1];
     const float dim = v.idle_dim;
@@ -322,6 +320,7 @@ lv_area_t View::menu_reveal(float progress) const {
     return {x, y, x + w - 1, y + h - 1};
 }
 void View::draw_menu(lv_layer_t* layer) {
+    const auto& menu_model = menu_preview_ ? *menu_preview_ : model_;
     const auto& th = hud_theme_at(model_.theme);
     lv_area_t bounds;
     lv_obj_get_coords(menu_, &bounds);
@@ -360,21 +359,21 @@ void View::draw_menu(lv_layer_t* layer) {
         const std::string title = Model::tab_name(tab);
         const int tw = int(text_.advance(title) * 21 * u / canopy::kFontPixels);
         text_.canvas(layer, title, tab_x, pad + 52 * u, 21 * u, false,
-                     tab == model_.tab ? th.text : th.quiet, content_alpha, x, y);
-        if (tab == model_.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, 1);
+                      tab == menu_model.tab ? th.text : th.quiet, content_alpha, x, y);
+        if (tab == menu_model.tab) rect(layer, x + tab_x, y + pad + int(61 * u), tw, std::max(1, int(3 * u)), th.accent, 1);
         tab_x += tw + int(26 * u);
     }
     const int list_top = pad + int(78 * u);
     rect(layer, x + pad, y + list_top - int(6 * u), w - 2 * pad, 1, th.quiet, 0.3f);
-    const auto rows = model_.rows(now_);
-    const bool editing = model_.stage == MenuStage::Edit;
+    const auto rows = menu_model.rows(now_);
+    const bool editing = menu_model.stage == MenuStage::Edit;
     const int extra = editing ? int(80 * u) : 0;
     const int help_y = h - int(150 * u);
     const int visible = std::max(1, (help_y - list_top - extra - int(12 * u)) / row_h);
-    const int start = std::clamp(model_.selected - visible / 2, 0, std::max(0, int(rows.size()) - visible));
+    const int start = std::clamp(menu_model.selected - visible / 2, 0, std::max(0, int(rows.size()) - visible));
     int ry = list_top;
     for (int i = start; i < std::min(int(rows.size()), start + visible); ++i) {
-        const bool selected = i == model_.selected;
+        const bool selected = i == menu_model.selected;
         const bool expanded = selected && editing;
         const int rh = row_h + (expanded ? extra : 0);
         if (selected) {
@@ -384,7 +383,7 @@ void View::draw_menu(lv_layer_t* layer) {
         const float baseline = ry + row_h * 0.5f + 23 * u * 0.36f;
         text_.canvas(layer, rows[i].name, pad, baseline, 23 * u, false, th.text, content_alpha * (selected ? 1 : 0.82f), x, y);
         if (expanded) {
-            const int current = model_.option_index(), n = int(rows[i].options.size());
+            const int current = menu_model.option_index(), n = int(rows[i].options.size());
             for (int delta = -1; delta <= 1; ++delta) {
                 const int choice = (current + delta + n) % n;
                 const float size = (delta == 0 ? 30 : 18) * u;
@@ -401,7 +400,7 @@ void View::draw_menu(lv_layer_t* layer) {
         ry += rh;
     }
     rect(layer, x + pad, y + help_y, w - 2 * pad, 1, th.quiet, 0.35f);
-    std::istringstream words(model_.selected_help(now_));
+    std::istringstream words(menu_model.selected_help(now_));
     std::string word, line; int help_line = 0;
     auto emit_line = [&]() {
         text_.canvas(layer, line, pad, help_y + (28 + help_line * 26) * u, 18 * u, false, th.quiet, content_alpha * 0.85f, x, y);
@@ -443,13 +442,15 @@ void View::update(uint64_t now) {
     // Reveal the two-wing picker after the closing blade has settled. Fading
     // it in during closure redraws both HUD wings for every moving frame.
     hidden(picker_, !model_.menu_open || model_.stage != MenuStage::Pick || menu_progress_ > 0);
-    const auto& t = model_.telemetry;
-    const auto& flight = model_.flight;
+    const auto& t = model_.backend.vrx;
+    const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
     if (flight_fresh && flight.have_cell_v) cell_peak_ = std::max(cell_peak_, flight.cell_v);
     const bool fresh = t.fresh(now), valid = t.link_valid(now);
-    const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details;
-    const bool data = !initialized_ || model_.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
+    const bool hud_visible = model_.hud_visible();
+    for (auto* panel : panels_) hidden(panel, !hud_visible);
+    const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details || old_hud_visible_ != hud_visible;
+    const bool data = !initialized_ || model_.backend.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
         t.connected != presented_.connected || t.mcs != presented_.mcs ||
         t.frequency_raw != presented_.frequency_raw || t.distance_raw != presented_.distance_raw ||
         t.quality_raw != presented_.quality_raw || t.voltage_mv != presented_.voltage_mv ||
@@ -482,7 +483,7 @@ void View::update(uint64_t now) {
     if (appearance || data || model_.visual.animating || (menu && next == 0))
         for (auto* p : panels_) lv_obj_invalidate(p);
     else if (wing_visibility_changed) lv_obj_invalidate(panels_[active_menu_side_]);
-    hidden(status_, valid);
+    hidden(status_, valid || !hud_visible);
     if (!valid) {
         if (appearance || data) lv_obj_invalidate(status_);
     }
@@ -490,7 +491,8 @@ void View::update(uint64_t now) {
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;
     old_menu_ = model_.menu_open; old_tab_ = model_.tab; old_selected_ = model_.selected;
     menu_version_ = model_.menu_version; old_details_ = model_.show_details;
+    old_hud_visible_ = hud_visible;
     rejected_inputs_ = model_.rejected_inputs;
-    flight_version_ = model_.flight_version; old_flight_fresh_ = flight_fresh;
+    flight_version_ = model_.backend.flight_version; old_flight_fresh_ = flight_fresh;
 }
 } // namespace kestrel_ui

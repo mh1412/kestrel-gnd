@@ -34,8 +34,8 @@ void StockBackend::disconnect() {
     if (client_ >= 0) close(client_);
     client_ = -1; parser_.reset(); serial_.reset(); replies_.clear();
 }
-void StockBackend::poll(Model& model, uint64_t now) {
-    auto& state = model.telemetry;
+void StockBackend::poll(BackendState& model, uint64_t now) {
+    auto& state = model.vrx;
     // Accept at most one extra connection each tick; never let a connection
     // flood starve rendering. The already connected backend remains owner.
     int incoming = accept4(listener_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);

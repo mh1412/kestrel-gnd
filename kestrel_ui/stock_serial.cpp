@@ -1,4 +1,5 @@
 #include "stock_serial.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -120,7 +121,7 @@ void StockSerial::message(uint16_t function, const uint8_t* p, size_t n, uint8_t
     default: ++state_.unhandled; return;
     }
 }
-void StockSerial::publish(Model& model, uint64_t now) const {
+void StockSerial::publish(BackendState& model, uint64_t now) const {
     model.serial = state_;
     BfTelem next;
     next.stamp_us = std::max(status_us_, analog_us_);

@@ -4,11 +4,12 @@
 #include "lvgl.h"
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace kestrel_ui {
 class View {
 public:
-    View(Model& model, int width, int height, const std::string& assets);
+    View(const Model& model, int width, int height, const std::string& assets);
     ~View();
     void update(uint64_t now);
     size_t text_cache_bytes() const { return text_.cached_bytes(); }
@@ -22,7 +23,8 @@ private:
         int x = 0, y = 0;
         void load(const std::string& path, int width, int height);
     };
-    Model& model_;
+    const Model& model_;
+    std::optional<Model> menu_preview_;
     int width_, height_;
     PerspectiveText text_;
     uint64_t now_ = 0;
@@ -35,6 +37,7 @@ private:
     uint64_t menu_version_ = 0;
     uint64_t rejected_inputs_ = 0;
     bool old_details_ = true;
+    bool old_hud_visible_ = true;
     int active_menu_side_ = 0;
     bool old_menu_ = false;
     float menu_progress_ = 0;

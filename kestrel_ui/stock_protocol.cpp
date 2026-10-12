@@ -1,4 +1,5 @@
 #include "stock_protocol.hpp"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 

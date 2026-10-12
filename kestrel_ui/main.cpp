@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
         {
             kestrel_ui::Display display(o.width, o.height, o.framebuffer);
             kestrel_ui::Model model;
+            kestrel_ui::Controller controller(model);
             auto preferences = kestrel_ui::load_preferences(o.config);
             if (o.config.empty() || o.fps_override) preferences.fps = o.fps;
             model.set_preferences(preferences);
@@ -110,8 +111,8 @@ int main(int argc, char** argv) {
             model.display_width = display.width(); model.display_height = display.height();
             lv_timer_set_period(lv_display_get_refr_timer(display.lv_display()), 1000 / model.fps);
             int applied_fps = model.fps;
-            if (!o.config.empty()) model.save_preferences = [&](const kestrel_ui::UiPreferences& p) { kestrel_ui::store_preferences(o.config, p); };
-            if (o.show_menu) model.open_menu();
+            if (!o.config.empty()) controller.save_preferences = [&](const kestrel_ui::UiPreferences& p) { kestrel_ui::store_preferences(o.config, p); };
+            if (o.show_menu) controller.open_menu();
             kestrel_ui::View view(model, display.width(), display.height(), o.assets);
             kestrel_ui::Input input(o.input, o.control, o.stock_keys);
             model.input_sources = input.sources(); model.control_path = o.control;
@@ -125,10 +126,10 @@ int main(int argc, char** argv) {
             while (!stop && !model.quit) {
                 const uint64_t now = kestrel_ui::monotonic_us();
                 if (o.seconds && now - started >= uint64_t(o.seconds) * 1000000) break;
-                if (backend) backend->poll(model, now);
+                if (backend) backend->poll(model.backend, now);
                 else if (now / 400000 != demo_tick) {
                     demo_tick = now / 400000;
-                    auto& t = model.telemetry;
+                    auto& t = model.backend.vrx;
                     t.stamp_us = now; ++t.status_frames;
                     t.connected = ((now - started) / 1000000) % 12 < 9;
                     t.mcs = t.connected ? 4 : -1;
@@ -137,18 +138,18 @@ int main(int argc, char** argv) {
                     if (t.connected) {
                         // Explicit host/offscreen simulation, never populated
                         // by the stock adapter without validated FC forwarding.
-                        auto& f = model.flight;
+                        auto& f = model.backend.flight;
                         f.stamp_us = now;
                         f.have_cell_v = f.have_pack_v = f.have_amps = f.have_speed = f.have_lq = f.have_mode = f.have_timer = true;
                         f.cell_v = 4.10f - 0.08f * std::sin(float(now - started) / 2000000);
                         f.pack_v = f.cell_v * 4; f.amps = 5.6f; f.speed_kmh = 72; f.lq_pct = 94;
                         f.arm = 1; f.timer_s = 194 + int((now - started) / 1000000);
                         std::snprintf(f.mode, sizeof(f.mode), "ACRO");
-                        ++model.flight_version;
+                        ++model.backend.flight_version;
                     }
                 }
-                input.poll(model, now);
-                if (menu_requested) { menu_requested = 0; model.key(kestrel_ui::Key::Menu); }
+                input.poll(controller, now);
+                if (menu_requested) { menu_requested = 0; controller.key(kestrel_ui::Key::Menu); }
                 if (model.fps != applied_fps) {
                     applied_fps = model.fps;
                     lv_timer_set_period(lv_display_get_refr_timer(display.lv_display()), 1000 / applied_fps);
@@ -156,7 +157,7 @@ int main(int argc, char** argv) {
                 }
                 if (now >= next_tick) {
                     const uint64_t frame_started = kestrel_ui::monotonic_us(), paints_before = display.presentations;
-                    model.tick(now); view.update(now); lv_timer_handler();
+                    controller.tick(now); view.update(now); lv_timer_handler();
                     // The application owns animation cadence. LVGL's timer
                     // may not yet be due after variable update/draw work; force
                     // this tick's damage out rather than skipping its pose.
@@ -176,7 +177,7 @@ int main(int argc, char** argv) {
                 }
                 if (now >= next_log) {
                     rusage usage{}; getrusage(RUSAGE_SELF, &usage);
-                    const auto& t = model.telemetry;
+                    const auto& t = model.backend.vrx;
                     std::printf("STATUS frames=%llu unknown=%llu bad=%llu layout_bytes=%u connected=%d mcs=%d voltage_mv=%d cpu_x100=%d state=\"%s\" rss_kib=%ld render_avg_us=%llu flushes=%llu bytes=%llu text_bytes=%zu text_rasters=%llu paints=%llu snapshots=%llu\n",
                         (unsigned long long)t.status_frames, (unsigned long long)t.unknown_frames, (unsigned long long)t.bad_frames,
                         t.status_payload_bytes, t.connected, t.mcs, t.voltage_mv, t.cpu_temperature_x100, model.status(now).c_str(), usage.ru_maxrss,
@@ -192,9 +193,9 @@ int main(int argc, char** argv) {
                                     (unsigned long long)(sum / sorted.size()),
                                     (unsigned long long)sorted[(sorted.size() - 1) * 95 / 100], (unsigned long long)sorted.back());
                     }
-                    const auto& serial = model.serial;
+                    const auto& serial = model.backend.serial;
                     if (serial.envelopes || serial.vendor_notifications) {
-                        const auto& flight = model.flight;
+                        const auto& flight = model.backend.flight;
                         const auto rc = model.rc_signal(now);
                         std::printf("SERIAL envelopes=%llu bytes=%llu msp=%llu status=%llu analog=%llu malformed=%llu discarded=%llu other=%llu requests=%llu errors=%llu vendor=%llu variant=\"%s\" firmware=\"%s\" active=%d arm=%d pack_v=%.2f amps=%.2f rc_source=\"%s\" rc_pct=%d\n",
                             (unsigned long long)serial.envelopes, (unsigned long long)serial.bytes,
@@ -212,7 +213,7 @@ int main(int argc, char** argv) {
             }
             display.verify_framebuffer();
             if (!o.screenshot.empty()) display.dump(o.screenshot);
-            std::printf("EXIT frames=%llu ticks=%llu flushes=%llu screenshot=%s\n", (unsigned long long)model.telemetry.status_frames,
+            std::printf("EXIT frames=%llu ticks=%llu flushes=%llu screenshot=%s\n", (unsigned long long)model.backend.vrx.status_frames,
                         (unsigned long long)ticks, (unsigned long long)display.flushes, o.screenshot.c_str());
         }
         lv_deinit();

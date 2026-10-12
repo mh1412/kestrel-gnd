@@ -1,5 +1,5 @@
 #pragma once
-#include "model.hpp"
+#include "controller.hpp"
 #include <csignal>
 #include <sys/stat.h>
 #include <termios.h>
@@ -23,7 +23,7 @@ public:
     ~Input();
     Input(const Input&) = delete;
     Input& operator=(const Input&) = delete;
-    void poll(Model& model, uint64_t now);
+    void poll(Controller& controller, uint64_t now);
     std::string sources() const;
 private:
     TerminalDecoder terminal_;

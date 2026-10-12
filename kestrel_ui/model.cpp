@@ -38,21 +38,15 @@ bool parse_key(const std::string& text, Key& key) {
     for (unsigned i = 0; i < 8; ++i) if (normalized == key_name(static_cast<Key>(i))) { key = static_cast<Key>(i); return true; }
     return false;
 }
-void Model::tick(uint64_t now) {
-    visual = canopy::link_visual(telemetry.link_valid(now), now, previous_, up_, down_);
-    if (menu_open) {
-        const auto menu = rows(now);
-        if (stage == MenuStage::Edit && !edit_intact()) cancel_edit();
-        selected = std::clamp(selected, 0, std::max(0, int(menu.size()) - 1));
-    }
-}
 std::string Model::status(uint64_t now) const {
+    const auto& telemetry = backend.vrx;
     if (!telemetry.fresh(now)) return telemetry.stamp_us ? "BACKEND STALE" : "WAITING FOR BACKEND";
     if (!telemetry.connected) return "NO RF LINK";
     if (telemetry.mcs < 0) return "LINK UP / NO VALID MCS";
     return "RF CONNECTED / VIDEO UNVERIFIED";
 }
 RcSignal Model::rc_signal(uint64_t now) const {
+    const auto& flight = backend.flight;
     if (!flight.stamp_us || now < flight.stamp_us || now - flight.stamp_us >= 2000000) return {};
     // RSSI is signal strength, not packet delivery quality. Keep the source
     // distinct and prefer real LQ when a backend supplies it, including 0% LQ.
@@ -61,6 +55,14 @@ RcSignal Model::rc_signal(uint64_t now) const {
     if (flight.have_rssi && flight.rssi_pct >= 0 && flight.rssi_pct <= 100)
         return {RcSource::Rssi, flight.rssi_pct};
     return {};
+}
+SceneMode Model::scene_mode() const {
+    if (scene == SceneMode::GalleryBrowse || scene == SceneMode::GalleryPlayback) return scene;
+    return menu_open ? SceneMode::Menu : SceneMode::Live;
+}
+bool Model::hud_visible() const {
+    const auto mode = scene_mode();
+    return mode == SceneMode::Live || mode == SceneMode::Menu;
 }
 const char* Model::tab_name(int t) {
     static const char* names[] = {"RADIO", "HUD", "SYSTEM", "DISPLAY", "INPUT", "INFO", "SERIAL"};
@@ -72,6 +74,9 @@ int Model::remembered_section() const {
     return std::find(tabs.begin(), tabs.end(), remembered_tab_[side]) == tabs.end() ? tabs.front() : remembered_tab_[side];
 }
 std::vector<MenuRow> Model::rows(uint64_t now) const {
+    const auto& telemetry = backend.vrx;
+    const auto& serial = backend.serial;
+    const auto& flight = backend.flight;
     const bool fresh = telemetry.fresh(now), valid = telemetry.link_valid(now);
     auto value = [&](int v, bool available) { return available ? std::to_string(v) : "--"; };
     if (tab == 0) return {
@@ -152,78 +157,11 @@ void Model::set_preferences(const UiPreferences& p) {
         throw std::invalid_argument("Invalid UI preferences");
     theme = p.theme; fps = p.fps; show_details = p.details; key_repeat = p.repeat;
 }
-void Model::open_menu() { menu_open = true; stage = MenuStage::Pick; feedback.clear(); ++menu_version; }
 bool Model::edit_intact() const {
     const auto menu = rows(monotonic_us());
     return tab == edit_tab_ && selected >= 0 && selected < int(menu.size()) && menu[selected].editable && menu[selected].id == edit_id_;
 }
-void Model::cancel_edit() {
-    if (!edit_id_.empty()) set_setting(edit_id_, edit_original_);
-    edit_id_.clear(); stage = MenuStage::Browse; feedback = "Change cancelled"; ++menu_version;
-}
 int Model::option_index() const { return stage == MenuStage::Edit ? setting(edit_id_) : 0; }
-void Model::key(Key key, bool repeat) {
-    const bool arrow = key == Key::Up || key == Key::Down || key == Key::Left || key == Key::Right;
-    if (repeat && (!key_repeat || !arrow)) return;
-    ++key_count; last_key = key_name(key); ++menu_version;
-    if (key == Key::Quit) { if (stage == MenuStage::Edit) cancel_edit(); quit = true; return; }
-    if (key == Key::Menu) {
-        if (menu_open) { if (stage == MenuStage::Edit) cancel_edit(); menu_open = false; stage = MenuStage::Pick; }
-        else open_menu();
-        return;
-    }
-    if (!menu_open) { if (key == Key::Enter) open_menu(); return; }
-    if (stage == MenuStage::Edit) {
-        if (!edit_intact()) { cancel_edit(); return; }
-        if (key == Key::Back || key == Key::Left) { cancel_edit(); return; }
-        const auto menu = rows(monotonic_us());
-        if (key == Key::Up || key == Key::Down) {
-            const int n = int(menu[selected].options.size());
-            if (n) set_setting(edit_id_, (setting(edit_id_) + (key == Key::Down ? 1 : n - 1)) % n);
-        } else if (key == Key::Enter) {
-            try {
-                if (save_preferences) { save_preferences(preferences()); feedback = "UI preference saved"; }
-                else feedback = "Applied for this session";
-            } catch (const std::exception& error) {
-                set_setting(edit_id_, edit_original_);
-                feedback = std::string("Save failed; cancelled: ") + std::string(error.what()).substr(0, 80);
-            }
-            edit_id_.clear(); stage = MenuStage::Browse;
-        }
-        return;
-    }
-    if (key == Key::Back) {
-        if (stage == MenuStage::Browse) stage = MenuStage::Pick;
-        else menu_open = false;
-        feedback.clear(); return;
-    }
-    if (stage == MenuStage::Pick) {
-        if (key == Key::Left) side = 0;
-        else if (key == Key::Right) side = 1;
-        else if (key == Key::Up || key == Key::Down) side = 1 - side; // Three-button controllers can choose too.
-        else if (key == Key::Enter) {
-            const auto tabs = side_tabs();
-            const int remembered = remembered_tab_[side];
-            tab = std::find(tabs.begin(), tabs.end(), remembered) == tabs.end() ? tabs.front() : remembered;
-            selected = 0; stage = MenuStage::Browse;
-        }
-        return;
-    }
-    feedback.clear();
-    const auto menu = rows(monotonic_us());
-    selected = std::clamp(selected, 0, int(menu.size()) - 1);
-    if (key == Key::Up) selected = (selected + int(menu.size()) - 1) % int(menu.size());
-    else if (key == Key::Down) selected = (selected + 1) % int(menu.size());
-    else if (key == Key::Left || key == Key::Right) {
-        const auto tabs = side_tabs();
-        auto found = std::find(tabs.begin(), tabs.end(), tab);
-        int index = found == tabs.end() ? 0 : int(found - tabs.begin());
-        index = std::clamp(index + (key == Key::Right ? 1 : -1), 0, int(tabs.size()) - 1);
-        remembered_tab_[side] = tab = tabs[index]; selected = 0;
-    } else if (key == Key::Enter && menu[selected].editable) {
-        edit_tab_ = tab; edit_id_ = menu[selected].id; edit_original_ = setting(edit_id_); stage = MenuStage::Edit;
-    }
-}
 std::string Model::selected_help(uint64_t now) const {
     if (stage == MenuStage::Edit) return "Preview: UP/DOWN changes. OK applies and saves. BACK cancels.";
     const auto menu = rows(now);

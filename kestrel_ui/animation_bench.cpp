@@ -1,5 +1,6 @@
 #include "display.hpp"
 #include "view.hpp"
+#include "controller.hpp"
 #include "ui/frame_cadence.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -28,6 +29,7 @@ int main(int argc, char** argv) {
             kestrel_ui::Display display(1920, 1080, "", rows);
             lv_timer_set_period(lv_display_get_refr_timer(display.lv_display()), 1000 / fps);
             kestrel_ui::Model model;
+            kestrel_ui::Controller controller(model);
             model.menu_open = true; model.side = 0; model.tab = 1;
             kestrel_ui::View view(model, 1920, 1080, argv[1]);
             const uint64_t started = kestrel_ui::monotonic_us();
@@ -38,12 +40,12 @@ int main(int argc, char** argv) {
             while (kestrel_ui::monotonic_us() - started < 6000000) {
                 const uint64_t now = kestrel_ui::monotonic_us();
                 if (now < next) { usleep(unsigned(std::min<uint64_t>(2000, next - now))); continue; }
-                model.telemetry.stamp_us = now; model.telemetry.connected = true; model.telemetry.mcs = 10;
-                model.telemetry.voltage_mv = 11400; model.telemetry.cpu_temperature_x100 = 5800;
+                model.backend.vrx.stamp_us = now; model.backend.vrx.connected = true; model.backend.vrx.mcs = 10;
+                model.backend.vrx.voltage_mv = 11400; model.backend.vrx.cpu_temperature_x100 = 5800;
                 const auto stage = ((now - started) / 360000) % 2 ? kestrel_ui::MenuStage::Pick : kestrel_ui::MenuStage::Browse;
                 if (model.stage != stage) { model.stage = stage; ++model.menu_version; }
                 const uint64_t before = display.presentations;
-                model.tick(now); view.update(now); lv_timer_handler();
+                controller.tick(now); view.update(now); lv_timer_handler();
                 if (paced) lv_refr_now(display.lv_display());
                 const uint64_t finished = kestrel_ui::monotonic_us();
                 if (now - started > 1000000 && view.animating()) {
