@@ -34,6 +34,7 @@ struct Packet {
 struct Frame {
     uint32_t slot = 0;
     uint64_t render_us = 0, cache_bytes = 0, rasters = 0;
+    uint32_t changed_regions = 0;
 };
 std::vector<uint8_t> encode(const Layout& layout);
 Layout decode_layout(const std::vector<uint8_t>& bytes);

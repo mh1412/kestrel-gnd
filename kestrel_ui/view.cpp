@@ -309,12 +309,16 @@ void View::update(uint64_t now) {
         }
     }
     if (appearance || menu) lv_obj_invalidate(picker_);
-    if (appearance || hud_changed || (menu && next == 0)) {
+    if (appearance || (menu && next == 0)) {
         for (auto* object : hud_objects_) lv_obj_invalidate(object);
-    } else if (wing_visibility_changed) {
-        for (size_t i = 0; i < hud_objects_.size(); ++i)
-            if ((hud_layout_.regions[i].role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
-                (hud_layout_.regions[i].role == hud_ipc::Role::RightWing && active_menu_side_ == 1)) lv_obj_invalidate(hud_objects_[i]);
+    } else {
+        if (hud_changed) for (size_t i = 0; i < hud_objects_.size(); ++i)
+            if (hud_->changed_regions() & (1u << i)) lv_obj_invalidate(hud_objects_[i]);
+        if (wing_visibility_changed) {
+            for (size_t i = 0; i < hud_objects_.size(); ++i)
+                if ((hud_layout_.regions[i].role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
+                    (hud_layout_.regions[i].role == hud_ipc::Role::RightWing && active_menu_side_ == 1)) lv_obj_invalidate(hud_objects_[i]);
+        }
     }
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;

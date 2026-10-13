@@ -2,6 +2,7 @@
 #include "clock.hpp"
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <poll.h>
@@ -42,6 +43,7 @@ int main(int argc, char** argv) {
                 std::unique_ptr<kestrel_ui::HudBuffer> buffer;
                 std::optional<kestrel_ui::HudData> latest;
                 uint64_t latest_seq = 0, rendered_seq = 0;
+                int last_slot = -1;
                 std::array<uint64_t, 2> leases{};
                 while (!stopped) {
                     for (int i = 0; i < 16; ++i) {
@@ -64,8 +66,11 @@ int main(int argc, char** argv) {
                         const uint64_t started = kestrel_ui::monotonic_us();
                         view.render(*latest, *buffer, uint32_t(slot));
                         Frame f{uint32_t(slot), kestrel_ui::monotonic_us() - started, view.cache_bytes(), view.rasters()};
+                        for (size_t i = 0; i < view.layout().regions.size(); ++i)
+                            if (last_slot < 0 || std::memcmp(buffer->region(uint32_t(last_slot), i), buffer->region(uint32_t(slot), i), view.layout().regions[i].bytes()))
+                                f.changed_regions |= 1u << i;
                         while (!stopped && !send(ipc, Type::Frame, latest_seq, encode(f))) { pollfd p{ipc, POLLOUT, 0}; ::poll(&p, 1, 100); }
-                        leases[slot] = latest_seq; rendered_seq = latest_seq;
+                        leases[slot] = latest_seq; rendered_seq = latest_seq; last_slot = slot;
                     }
                     pollfd p{ipc, POLLIN, 0}; ::poll(&p, 1, 20);
                 }

@@ -14,6 +14,7 @@ public:
     virtual const hud_ipc::Layout& layout() const = 0;
     virtual const lv_image_dsc_t* image(size_t region) const = 0;
     virtual uint64_t revision() const = 0;
+    virtual uint32_t changed_regions() const = 0;
     virtual size_t cache_bytes() const = 0;
     virtual uint64_t rasters() const = 0;
 };
@@ -27,6 +28,7 @@ public:
     const hud_ipc::Layout& layout() const override;
     const lv_image_dsc_t* image(size_t region) const override;
     uint64_t revision() const override;
+    uint32_t changed_regions() const override;
     size_t cache_bytes() const override;
     uint64_t rasters() const override;
 private:
@@ -40,6 +42,7 @@ public:
     const hud_ipc::Layout& layout() const override;
     const lv_image_dsc_t* image(size_t region) const override;
     uint64_t revision() const override;
+    uint32_t changed_regions() const override;
     size_t cache_bytes() const override;
     uint64_t rasters() const override;
     int pid() const;

@@ -101,14 +101,14 @@ HudData decode_data(const std::vector<uint8_t>& bytes) {
 }
 std::vector<uint8_t> encode(const Frame& frame) {
     if (frame.slot > 1) throw std::runtime_error("Invalid HUD frame slot");
-    Writer w; w.u(frame.slot, 4); w.u(frame.render_us, 8); w.u(frame.cache_bytes, 8); w.u(frame.rasters, 8); return w.out;
+    Writer w; w.u(frame.slot, 4); w.u(frame.render_us, 8); w.u(frame.cache_bytes, 8); w.u(frame.rasters, 8); w.u(frame.changed_regions, 4); return w.out;
 }
 Frame decode_frame(const std::vector<uint8_t>& bytes) {
-    Reader r{bytes}; Frame f; f.slot = uint32_t(r.u(4)); f.render_us = r.u(8); f.cache_bytes = r.u(8); f.rasters = r.u(8);
+    Reader r{bytes}; Frame f; f.slot = uint32_t(r.u(4)); f.render_us = r.u(8); f.cache_bytes = r.u(8); f.rasters = r.u(8); f.changed_regions = uint32_t(r.u(4));
     r.end(); if (f.slot > 1) throw std::runtime_error("Invalid HUD frame slot"); return f;
 }
 bool send(int socket, Type type, uint64_t sequence, const std::vector<uint8_t>& payload, int fd) {
-    Writer w; w.u(magic, 4); w.u(1, 2); w.u(uint16_t(type), 2); w.u(sequence, 8);
+    Writer w; w.u(magic, 4); w.u(2, 2); w.u(uint16_t(type), 2); w.u(sequence, 8);
     w.out.insert(w.out.end(), payload.begin(), payload.end());
     if (w.out.size() > max_packet) throw std::runtime_error("Oversized HUD packet");
     iovec io{w.out.data(), w.out.size()}; msghdr msg{}; msg.msg_iov = &io; msg.msg_iovlen = 1;
@@ -143,7 +143,7 @@ bool receive(int socket, Packet& packet) {
     }
     if (!fds.empty()) packet.fd = fds[0];
     packet.payload.assign(buffer, buffer + n); Reader r{packet.payload};
-    if (r.u(4) != magic || r.u(2) != 1) throw std::runtime_error("Unsupported HUD protocol");
+    if (r.u(4) != magic || r.u(2) != 2) throw std::runtime_error("Unsupported HUD protocol");
     const auto type = r.u(2); if (type < 1 || type > 5) throw std::runtime_error("Invalid HUD message type");
     packet.type = Type(type); packet.sequence = r.u(8);
     packet.payload.erase(packet.payload.begin(), packet.payload.begin() + r.at); return true;

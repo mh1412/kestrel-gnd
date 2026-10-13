@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
 #include <sys/prctl.h>
@@ -33,20 +34,27 @@ struct InlineHud::Impl {
     std::vector<uint8_t> previous;
     uint64_t revision = 0;
     uint32_t slot = 0;
+    uint32_t changed = 0;
     Impl(int w, int h, const std::string& assets) : view(w, h, assets), buffer(view.layout()) {}
     ~Impl() { drop_images(images); }
 };
 InlineHud::InlineHud(int w, int h, const std::string& assets) : impl_(std::make_unique<Impl>(w, h, assets)) {}
 InlineHud::~InlineHud() = default;
 void InlineHud::update(const HudData& data, uint64_t) {
+    impl_->changed = 0;
     auto wire = hud_ipc::encode(data); if (wire == impl_->previous) return;
+    const uint32_t old_slot = impl_->slot;
     drop_images(impl_->images); impl_->slot = 1 - impl_->slot;
     impl_->view.render(data, impl_->buffer, impl_->slot); images_for(impl_->images, impl_->buffer, impl_->slot);
+    for (size_t i = 0; i < impl_->view.layout().regions.size(); ++i)
+        if (impl_->previous.empty() || std::memcmp(impl_->buffer.region(old_slot, i), impl_->buffer.region(impl_->slot, i), impl_->view.layout().regions[i].bytes()))
+            impl_->changed |= 1u << i;
     impl_->previous = std::move(wire); ++impl_->revision;
 }
 const hud_ipc::Layout& InlineHud::layout() const { return impl_->view.layout(); }
 const lv_image_dsc_t* InlineHud::image(size_t i) const { return i < impl_->images.size() ? &impl_->images[i] : nullptr; }
 uint64_t InlineHud::revision() const { return impl_->revision; }
+uint32_t InlineHud::changed_regions() const { return impl_->changed; }
 size_t InlineHud::cache_bytes() const { return impl_->view.cache_bytes(); }
 uint64_t InlineHud::rasters() const { return impl_->view.rasters(); }
 
@@ -63,6 +71,7 @@ struct HudClient::Impl {
     uint64_t restarts = 0, frames = 0;
     int front = -1;
     bool setup = false;
+    uint32_t changed = 0;
     hud_ipc::Frame stats;
     Impl(int w, int h, std::string a, std::string e) : width(w), height(h), assets(std::move(a)), executable(std::move(e)) { start(); }
     ~Impl() { stop(); }
@@ -115,12 +124,14 @@ struct HudClient::Impl {
             const auto f = decode_frame(p.payload);
             if (!p.sequence || p.sequence > sent || p.sequence <= accepted || int(f.slot) == front)
                 throw std::runtime_error("Invalid HUD frame sequence/lease");
+            if (f.changed_regions >> layout.regions.size()) throw std::runtime_error("Invalid HUD damage mask");
             // update() runs only between completed synchronous UI refreshes.
             // The old front buffer cannot be released while draw tasks use it.
             drop_images(images);
             if (front >= 0) releases.emplace_back(uint32_t(front), accepted);
             front = int(f.slot); accepted = p.sequence; stats = f;
             images_for(images, *buffer, f.slot); ++revision; ++frames;
+            changed |= f.changed_regions;
         } else throw std::runtime_error("Unexpected HUD renderer message");
         progress_at = now;
     }
@@ -130,6 +141,7 @@ HudClient::HudClient(int w, int h, const std::string& assets, const std::string&
 HudClient::~HudClient() = default;
 void HudClient::update(const HudData& data, uint64_t now) {
     auto& s = *impl_;
+    s.changed = 0;
     if (s.socket < 0) {
         if (now < s.retry_at) return;
         try { s.start(); } catch (const std::exception& e) { std::fprintf(stderr, "HUD restart: %s\n", e.what()); s.retry_at = now + 500000; return; }
@@ -165,6 +177,7 @@ void HudClient::update(const HudData& data, uint64_t now) {
 const hud_ipc::Layout& HudClient::layout() const { return impl_->layout; }
 const lv_image_dsc_t* HudClient::image(size_t i) const { return i < impl_->images.size() ? &impl_->images[i] : nullptr; }
 uint64_t HudClient::revision() const { return impl_->revision; }
+uint32_t HudClient::changed_regions() const { return impl_->changed; }
 size_t HudClient::cache_bytes() const { return impl_->stats.cache_bytes; }
 uint64_t HudClient::rasters() const { return impl_->stats.rasters; }
 int HudClient::pid() const { return int(impl_->child); }

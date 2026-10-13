@@ -84,6 +84,8 @@ int main(int argc, char** argv) {
                 };
                 compare(controller.hud_data(now));
                 f.rssi_pct = 0; compare(controller.hud_data(now));
+                check(worker.changed_regions() == (1u << 1) && reference.changed_regions() == (1u << 1),
+                      "RSSI updates damage only the right HUD wing");
                 controller.set_scene(SceneMode::GalleryBrowse); compare(controller.hud_data(now));
                 for (size_t i = 0; i < worker.layout().regions.size(); ++i) {
                     const auto* image = worker.image(i);

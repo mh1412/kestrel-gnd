@@ -98,7 +98,7 @@ text-cache budget so splitting processes does not double the old aggregate cache
 
 The local socket pair uses `SOCK_SEQPACKET`, is private to the UI/child, and is
 passed as an inherited close-on-exec exception. Its wire header is `KHUD`, version
-1, message type and 64-bit sequence, with explicitly little-endian fields.
+2, message type and 64-bit sequence, with explicitly little-endian fields.
 Strings and fractions have bounds/finite-value checks; raw C++ object layouts
 and pointers never cross the boundary. Messages are:
 
@@ -107,7 +107,7 @@ and pointers never cross the boundary. Messages are:
   with one shared-memory descriptor passed using `SCM_RIGHTS`.
 - **Data:** a complete display-ready snapshot. Unchanged data is not resent;
   the renderer coalesces queued snapshots instead of drawing expired poses.
-- **Frame:** slot ID, data sequence and rendering/cache statistics.
+- **Frame:** slot ID, data sequence, changed-region mask and rendering/cache statistics.
 - **Release:** exact slot/sequence lease acknowledgement.
 
 The UI holds its front slot until its synchronous drawing work has finished.
@@ -135,3 +135,80 @@ has one IPC socket, no physical input/framebuffer descriptors, and no inherited
 backend connection. Native and ASan/UBSan suites passed. An initial static ARM64
 offscreen run on the VRX also produced HUD frames, normal UI/child exit and left
 stock GUI/backend/radio PIDs unchanged; framebuffer/device validation follows.
+
+## Device checkpoint: UI/HUD composition and recovery
+
+The matched static Release executables are staged in `/tmp/kestrel-ui-dev` and
+running with the recovered KESTREL theme, 60-Hz cadence, details and repeat on.
+The stock backend/radio remain PIDs 397/396. After the user powered the paired
+VTX/FC, receiver status showed connected/MCS 10 and valid stock STATUS/ANALOG
+telemetry. The user confirmed **“Video and UI look correct.”**
+
+Descriptor audit established:
+
+- UI owns `/dev/fb0`, backend connection, menu-control and stock-key endpoints.
+- HUD has `/dev/null` input, inherited diagnostic output, one private IPC socket
+  and `/memfd:kestrel-hud`; no framebuffer, UART, GPIO or backend socket.
+
+During a theme preview the HUD alone was killed with SIGKILL. Cancel still
+restored KESTREL, section navigation continued, and menu state stayed in the UI.
+UI PID 27414 survived while renderer PID 27418 was replaced by 28382. The renderer
+received current data after restart; `hud_restarts=1` was visible over the existing
+control endpoint. Backend/radio PIDs did not change. The decoder counter advanced
+208 frames during the approximately 3.5-second exercise and its FPS estimate
+remained near 60.
+
+### Composition optimization
+
+Initial device measurements showed unnecessary repainting of both HUD wings
+when only one region changed. Protocol version 2 adds an explicit region-damage
+mask. The producer compares the completed region pixels with its previous frame;
+the UI invalidates only changed regions, retaining exact slot leases and latest-
+state coalescing. A regression verifies an RSSI-only change damages just the right
+wing and still exactly matches the synchronous reference pixels.
+
+The pair was updated in-place while the original stock-restoration wrapper was
+paused, avoiding a stock framebuffer-module reload during the upgrade. The old
+UI exited with **2,073,600 pixels / zero readback mismatches**. The new UI/HUD pair
+was left running. An older UI zombie is retained by that paused wrapper until
+the replacement session finishes; diagnostics should use `hud_pid`'s PPid or the
+recorded active UI PID rather than treating every `pidof kestrel-ui` result as a
+live writer.
+
+A visible-framebuffer read was downloaded and checked after renderer recovery:
+the same Canopy typography/geometry, real pack/current/disarmed readings, RC
+source caption and video ladder were present, with no duplicated or stale layer.
+The preview composites the ARGB overlay onto a host background; live video output
+was separately confirmed by the user.
+
+### Measurements
+
+Eight-second closed-menu/live-video sample:
+
+| Metric | UI | HUD |
+| --- | ---: | ---: |
+| CPU, percentage of one core | 6.48% | 1.62% |
+| Current RSS | 26,984 KiB | 10,104 KiB |
+| Peak RSS | 29,496 KiB | 10,104 KiB |
+| Proportional memory (PSS) | 26,126 KiB | 7,370 KiB |
+
+Combined UI/HUD CPU is **4.05% of the two-core chip**; combined PSS is 33,496 KiB
+(about **32.7 MiB**). PSS avoids counting shared pages twice. Video/backend CPU is
+not included in these UI/HUD percentages.
+
+After eight GOGGLE and four AIR UNIT open/fold cycles:
+
+```text
+ANIMATION ticks=356 painted=355 recent_avg_us=6152 recent_p95_us=38418 recent_max_us=78451
+```
+
+These are parent UI update/presentation costs, including framebuffer writes,
+not the HUD worker's independent render time or guaranteed display FPS. The
+last quantized reveal may produce no damage. The 38-ms p95 still exceeds the
+60-Hz budget; long keyframes/cold work remain. The separate HUD coalesces updates
+and changes frame only when needed; it is not forced to render a 60-Hz full image.
+
+Latest native/sanitizer schema, core, renderer and worker suites plus real
+socket/control recovery checks passed. Gallery pause/visibility is verified with
+real renderer buffers in those tests; full gallery/media UI and GPU rendering
+remain subsequent adapters rather than completed standalone features.
