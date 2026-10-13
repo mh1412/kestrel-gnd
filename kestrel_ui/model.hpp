@@ -2,12 +2,12 @@
 #include "ui/canopy.hpp"
 #include "backend_state.hpp"
 #include "hud_data.hpp"
+#include "clock.hpp"
 #include <string>
 #include <vector>
 #include <functional>
 
 namespace kestrel_ui {
-uint64_t monotonic_us();
 
 enum class RcSource { Unavailable, LinkQuality, Rssi };
 struct RcSignal {
@@ -49,6 +49,8 @@ public:
     std::string last_key = "--", input_sources = "stdin", control_path;
     std::string feedback;
     int display_width = 1920, display_height = 1080;
+    int hud_pid = -1;
+    uint64_t hud_restarts = 0;
     canopy::LinkVisual visual;
     UiPreferences preferences() const { return {theme, fps, show_details, key_repeat}; }
     void set_preferences(const UiPreferences& p);

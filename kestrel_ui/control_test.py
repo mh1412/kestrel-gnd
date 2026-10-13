@@ -10,6 +10,8 @@ import time
 import os
 import pty
 import termios
+import signal
+import re
 
 
 def main():
@@ -113,6 +115,22 @@ def main():
                 if interactive.poll() is None:
                     interactive.terminate(); interactive.communicate(timeout=3)
                 os.close(master); os.close(slave)
+            before = expect("status", "theme=EMBER")
+            old_hud = int(re.search(r"hud_pid=(\d+)", before).group(1))
+            os.kill(old_hud, signal.SIGKILL)
+            # Navigation and local preferences remain owned by the UI while
+            # its passive renderer is absent/restarting.
+            expect("enter", "stage=pick", "theme=EMBER")
+            expect("enter", "stage=browse", "tab=INFO")
+            deadline = time.monotonic() + 5
+            while True:
+                state = command("status")
+                current_hud = int(re.search(r"hud_pid=(-?\d+)", state).group(1))
+                if current_hud > 0 and current_hud != old_hud and "hud_restarts=1" in state:
+                    break
+                assert process.poll() is None and time.monotonic() < deadline, "UI/HUD recovery failed: " + state
+                time.sleep(0.02)
+            expect("status", "stage=browse", "tab=INFO", "theme=EMBER")
             expect("quit", "theme=EMBER")
             output, error = process.communicate(timeout=5)
             assert process.returncode == 0, output + error
@@ -130,7 +148,7 @@ def main():
             conflict = subprocess.run([str(args.binary), "--demo", "--assets", str(args.assets), "--control", str(control)],
                                       capture_output=True, text=True, timeout=5)
             assert conflict.returncode != 0 and control.read_text() == "user data"
-            print("PASS: side picker, sections, edit preview/apply/cancel, CRLF, stock keys, IPC ownership, saved preferences and stale socket recovery")
+            print("PASS: navigation/preferences/terminal/stock keys, IPC ownership and independent HUD crash recovery")
         finally:
             client.close()
             if process.poll() is None:

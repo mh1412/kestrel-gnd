@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
             kestrel_ui::Model model;
             kestrel_ui::Controller controller(model);
             model.menu_open = true; model.side = 0; model.tab = 1;
-            kestrel_ui::View view(model, 1920, 1080, argv[1]);
+            kestrel_ui::View view(controller, 1920, 1080, argv[1]);
             const uint64_t started = kestrel_ui::monotonic_us();
             uint64_t next = started;
             const double cpu_start = cpu_us();

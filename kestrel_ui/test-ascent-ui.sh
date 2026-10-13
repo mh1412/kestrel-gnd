@@ -11,6 +11,7 @@ if [ "$seconds" -ne 0 ]; then
     [ "$seconds" -ge 5 ] && [ "$seconds" -le 120 ]
 fi
 [ -x "$directory/kestrel-ui" ]
+[ -x "$directory/kestrel-hud" ]
 [ -f "$directory/canopy-left.kui" ] && [ -f "$directory/canopy-right.kui" ]
 [ -f "$directory/canopy-font.kuf" ] && [ -f "$directory/canopy-font-OFL.txt" ]
 gui=$(pidof GlassesUI)

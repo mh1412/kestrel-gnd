@@ -1,7 +1,7 @@
 #include "perspective_text.hpp"
 
 namespace kestrel_ui {
-PerspectiveText::PerspectiveText(const std::string& path, int w, int h) : font_(path), width_(w), height_(h) {}
+PerspectiveText::PerspectiveText(const std::string& path, int w, int h, size_t budget) : font_(path), width_(w), height_(h), budget_(budget) {}
 PerspectiveText::~PerspectiveText() { while (!cache_.empty()) remove(cache_.begin()); }
 void PerspectiveText::remove(std::map<Key, Cached>::iterator entry) {
     lv_image_cache_drop(&entry->second.image);
@@ -13,7 +13,7 @@ void PerspectiveText::begin_frame() {
     // Called before lv_timer_handler, when the previous synchronous software
     // draw is complete. Never evict images from a DRAW callback: LVGL may still
     // have queued draw tasks referring to them in another partial-buffer strip.
-    while (cache_.size() > 96 || bytes_ > 1024 * 1024) {
+    while (cache_.size() > 96 || bytes_ > budget_) {
         auto victim = std::min_element(cache_.begin(), cache_.end(), [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
         remove(victim);
     }

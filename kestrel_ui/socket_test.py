@@ -8,6 +8,7 @@ import socket
 import struct
 import subprocess
 import time
+import os
 
 
 def packet(payload, sequence=0x5A, channel=1, flags=0x80):
@@ -83,6 +84,16 @@ def main():
             except socket.timeout:
                 pass
             time.sleep(2.1)  # Keep peer alive through the first serial log.
+            children = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+            assert len(children) == 1, "Expected exactly one passive HUD process: " + repr(children)
+            descriptors = []
+            for fd in Path(f"/proc/{children[0]}/fd").iterdir():
+                try:
+                    descriptors.append(os.readlink(fd))
+                except FileNotFoundError:
+                    pass
+            assert sum(value.startswith("socket:") for value in descriptors) == 1, descriptors
+            assert not any("/dev/fb" in value or "/dev/tty" in value for value in descriptors), descriptors
         process.stdin.write("md\n")
         process.stdin.flush()
         output, error = process.communicate(timeout=8)

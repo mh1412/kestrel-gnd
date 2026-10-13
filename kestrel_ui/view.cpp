@@ -11,8 +11,6 @@ namespace kestrel_ui {
 namespace {
 lv_color_t color(const float* rgb) { return lv_color_make(uint8_t(rgb[0] * 255), uint8_t(rgb[1] * 255), uint8_t(rgb[2] * 255)); }
 lv_opa_t opacity(float v) { return lv_opa_t(std::clamp(v * 255, 0.0f, 255.0f)); }
-std::string number(float v, const char* format) { char text[80]; std::snprintf(text, sizeof(text), format, v); return text; }
-uint32_t le32(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
 void hidden(lv_obj_t* object, bool hide) {
     if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hide) return;
     if (hide) lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
@@ -27,45 +25,13 @@ void rect(lv_layer_t* layer, int x, int y, int w, int h, const float* rgb, float
     lv_draw_rect(layer, &d, &a);
 }
 }
-void View::Asset::load(const std::string& path, int width, int height) {
-    std::ifstream in(path, std::ios::binary);
-    uint8_t header[28]{};
-    if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "KUIA", 4) ||
-        le32(header + 4) != uint32_t(width) || le32(header + 8) != uint32_t(height))
-        throw std::runtime_error("Missing/mismatched canopy asset: " + path + " (run host assetgen for the display resolution)");
-    const uint32_t ox = le32(header + 12), oy = le32(header + 16), w = le32(header + 20), h = le32(header + 24);
-    if (!w || !h || uint64_t(ox) + w > uint32_t(width) || uint64_t(oy) + h > uint32_t(height))
-        throw std::runtime_error("Invalid canopy asset bounds");
-    x = int(ox); y = int(oy);
-    pixels.resize(size_t(w) * h);
-    if (!in.read(reinterpret_cast<char*>(pixels.data()), pixels.size()) || in.peek() != std::char_traits<char>::eof())
-        throw std::runtime_error("Invalid canopy asset length");
-    image.header.magic = LV_IMAGE_HEADER_MAGIC; image.header.cf = LV_COLOR_FORMAT_A8;
-    image.header.w = w; image.header.h = h; image.header.stride = w;
-    image.data_size = pixels.size(); image.data = pixels.data();
-}
-View::View(const Model& model, int w, int h, const std::string& assets)
-    : model_(model), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h) {
-    assets_[0].load(assets + "/canopy-left.kui", w, h);
-    assets_[1].load(assets + "/canopy-right.kui", w, h);
+View::View(const Controller& controller, int w, int h, const std::string& assets, HudSource* hud)
+    : controller_(controller), model_(controller.model()), hud_(hud), width_(w), height_(h), text_(assets + "/canopy-font.kuf", w, h, 512 * 1024) {
+    if (!hud_) { owned_hud_ = std::make_unique<InlineHud>(w, h, assets); hud_ = owned_hud_.get(); }
     screen_ = lv_screen_active();
     lv_obj_remove_style_all(screen_);
     lv_obj_set_style_bg_opa(screen_, LV_OPA_TRANSP, 0);
     lv_obj_remove_flag(screen_, LV_OBJ_FLAG_SCROLLABLE);
-    for (int i = 0; i < 2; ++i) {
-        panels_[i] = lv_obj_create(screen_);
-        lv_obj_remove_style_all(panels_[i]);
-        lv_obj_set_pos(panels_[i], i ? w / 2 : 0, h * 2 / 3);
-        lv_obj_set_size(panels_[i], w / 2, h - h * 2 / 3);
-        lv_obj_remove_flag(panels_[i], LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(panels_[i], draw_event, LV_EVENT_DRAW_MAIN, this);
-    }
-    status_ = lv_obj_create(screen_);
-    lv_obj_remove_style_all(status_);
-    lv_obj_set_pos(status_, w / 4, h / 3);
-    lv_obj_set_size(status_, w / 2, h / 5);
-    lv_obj_remove_flag(status_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(status_, draw_event, LV_EVENT_DRAW_MAIN, this);
     picker_ = lv_obj_create(screen_);
     lv_obj_remove_style_all(picker_);
     lv_obj_set_pos(picker_, 0, h * 58 / 100);
@@ -81,6 +47,7 @@ View::View(const Model& model, int w, int h, const std::string& assets)
     lv_obj_remove_flag(menu_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(menu_, draw_event, LV_EVENT_DRAW_MAIN, this);
     lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
+    sync_hud_objects();
 }
 View::~View() { lv_obj_clean(screen_); drop_menu_snapshot(); }
 void View::drop_menu_snapshot() {
@@ -131,170 +98,29 @@ void View::draw_event(lv_event_t* e) {
     auto* layer = lv_event_get_layer(e);
     if (target == self->menu_) self->draw_menu(layer);
     else if (target == self->picker_) self->draw_picker(layer);
-    else if (target == self->status_) self->draw_status(layer);
-    else self->draw_panel(layer, target == self->panels_[0]);
+    else for (size_t i = 0; i < self->hud_objects_.size(); ++i) if (target == self->hud_objects_[i]) { self->draw_hud(layer, i); break; }
 }
-void View::track(lv_layer_t* layer, bool left, float start, float end, float y,
-                 float height, int segments, float filled, const float* rgb, float alpha) {
-    const float pitch = (end - start) / (segments * (1 - 0.32f / 2));
-    float cursor = start;
-    const int shown = std::clamp(int(filled * segments + 0.5f), 0, segments);
-    const int revealed = std::clamp(int(model_.visual.block * segments + 0.5f), 0, segments);
-    for (int i = 0; i < std::min(segments, revealed); ++i) {
-        const float factor = 1 - 0.32f * i / std::max(1, segments - 1);
-        const float step = pitch * factor, width = step * 10 / 13;
-        const float x0 = cursor, x1 = x0 + width;
-        const float top = y - height * factor;
-        const auto p0 = canopy::project(width_, height_, left, x0, top);
-        const auto p1 = canopy::project(width_, height_, left, x1, top);
-        const auto p2 = canopy::project(width_, height_, left, x1, y);
-        const auto p3 = canopy::project(width_, height_, left, x0, y);
-        for (auto points : {std::array<canopy::Point, 3>{p0, p1, p2}, std::array<canopy::Point, 3>{p0, p2, p3}}) {
-            lv_draw_triangle_dsc_t tri;
-            lv_draw_triangle_dsc_init(&tri);
-            for (int j = 0; j < 3; ++j) tri.p[j] = {int32_t(std::lround(points[j].x)), int32_t(std::lround(points[j].y))};
-            tri.bg_color = color(rgb);
-            tri.bg_opa = opacity((i < shown ? 0.7f + 0.3f * (1 - float(i) / segments) : 0.12f) * alpha);
-            lv_draw_triangle(layer, &tri);
-        }
-        cursor += step;
+void View::sync_hud_objects() {
+    if (hud_layout_ == hud_->layout()) return;
+    for (auto* object : hud_objects_) lv_obj_delete(object);
+    hud_objects_.clear(); hud_layout_ = hud_->layout();
+    for (size_t i = 0; i < hud_layout_.regions.size(); ++i) {
+        const auto& r = hud_layout_.regions[i]; auto* object = lv_obj_create(screen_);
+        lv_obj_remove_style_all(object); lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(object, r.x, r.y); lv_obj_set_size(object, r.width, r.height);
+        lv_obj_add_event_cb(object, draw_event, LV_EVENT_DRAW_MAIN, this);
+        // HUD is below picker/menu, including when a worker reconnects.
+        lv_obj_move_to_index(object, int(i)); hud_objects_.push_back(object);
     }
 }
-void View::draw_panel(lv_layer_t* layer, bool left) {
-    auto v = model_.visual;
-    if (!v.visible && !model_.menu_open) return;
-    if (!v.visible) { v.visible = true; v.rule = v.shade = v.block = 1; v.idle_dim = v.rail_dim = 0.65f; }
-    // The unfolded blade replaces this instrument. Do not paint/fade the HUD
-    // underneath its translucent backdrop: that adds a second alpha-composite
-    // pass over the same large area on every animation frame.
-    if ((left ? 0 : 1) == active_menu_side_ && menu_progress_ > 0) return;
-    const auto& th = hud_theme_at(model_.theme);
-    const auto& t = model_.backend.vrx;
-    const bool picked = model_.menu_open && model_.stage == MenuStage::Pick && model_.side == (left ? 0 : 1);
-    const auto& bf = model_.backend.flight;
-    const bool flight_fresh = bf.stamp_us && now_ >= bf.stamp_us && now_ - bf.stamp_us < 2000000;
-    const auto& a = assets_[left ? 0 : 1];
-    const float dim = v.idle_dim;
-    lv_draw_image_dsc_t image;
-    lv_draw_image_dsc_init(&image);
-    image.src = &a.image; image.recolor = color(th.ground); image.recolor_opa = LV_OPA_COVER;
-    image.opa = opacity(dim * v.shade);
-    lv_area_t area{a.x, a.y, a.x + int(a.image.header.w) - 1, a.y + int(a.image.header.h) - 1};
-    lv_draw_image(layer, &image, &area);
-
-    // State labels sit inside a measured gap, rather than across an unbroken
-    // rail. No arm/standby state is invented from receiver-only telemetry.
-    const auto f = canopy::screen_frame(width_, height_);
-    const float content = dim * v.block * (left && !flight_fresh ? 0.75f : 1.0f);
-    auto digits_width = [&](std::string value, float size) {
-        for (char& c : value) if (c >= '0' && c <= '9') c = '0';
-        return text_.design_advance(value, size);
-    };
-    auto shared_baseline = [&](float size) { return 512 - (canopy::kTextBig - size) * 0.25f / f.U; };
-    float state_x = 60;
-    if (left) {
-        const bool have_voltage = bf.have_cell_v || bf.have_pack_v;
-        const std::string volts = have_voltage ? number(bf.have_cell_v ? bf.cell_v : bf.pack_v, "%.2f") : "--";
-        text_.panel(layer, volts, true, 14, 512, canopy::kTextBig, false, have_voltage ? th.text : th.quiet, content);
-        float x = 14 + digits_width(volts, canopy::kTextBig);
-        if (have_voltage) {
-            text_.panel(layer, "V", true, x, shared_baseline(canopy::kTextUnit), canopy::kTextUnit, false, th.text, content * 0.72f);
-            x += text_.design_advance("V", canopy::kTextUnit);
-        }
-        if (bf.have_amps) {
-            x += 10 * f.U / f.UX;
-            text_.panel(layer, "\xe2\x80\xa2", true, x, shared_baseline(canopy::kTextUnit), canopy::kTextUnit, false, th.quiet, content);
-            x += text_.design_advance("\xe2\x80\xa2", canopy::kTextUnit) + 10 * f.U / f.UX;
-            state_x = x;
-            const auto amps = number(bf.amps, "%.1f");
-            text_.panel(layer, amps, true, x, shared_baseline(canopy::kTextUnit), canopy::kTextUnit, false, th.text, content * 0.82f);
-            x += digits_width(amps, canopy::kTextUnit);
-            text_.panel(layer, "A", true, x, shared_baseline(canopy::kTextSmall), canopy::kTextSmall, false, th.text, content * 0.72f);
-        }
-    } else if (bf.have_speed) {
-        text_.panel(layer, "km/h", false, 14, shared_baseline(canopy::kTextSmall), canopy::kTextSmall, true, th.text, content * 0.72f);
-        text_.panel(layer, number(bf.speed_kmh, "%.0f"), false, 14 + text_.design_advance("km/h", canopy::kTextSmall),
-                    512, canopy::kTextBig, true, th.text, content);
-    } else text_.panel(layer, "--", false, 14, 512, canopy::kTextBig, true, th.quiet, content);
-    const bool idle = !left && v.mark > 0;
-    std::string state;
-    if (idle) { state = "IDLE"; state_x = 150; }
-    else if (left && bf.arm == 0) state = "DISARMED";
-    else if (left && bf.arm == 1) {
-        if (bf.have_timer) { char timer[24]; std::snprintf(timer, sizeof(timer), "%d'%02d\"", bf.timer_s / 60, bf.timer_s % 60); state = timer; }
-        else state = "ARMED";
-    }
-    const float state_width = text_.design_advance(state, canopy::kTextState);
-    constexpr float rest[] = {0.663f, 0.706f, 0.741f};
-    for (float y : {456.0f, 596.0f}) {
-        const float reach = picked ? 252 : 252 * v.rule;
-        for (int segment = 0; segment < 32; ++segment) {
-            float x0 = -canopy::kBleed + (252 + canopy::kBleed) * segment / 32;
-            float x1 = std::min(reach, -canopy::kBleed + (252 + canopy::kBleed) * (segment + 1) / 32);
-            if (x1 <= x0) continue;
-            const float gap_a = state_x - 8, gap_b = state_x + state_width + 10;
-            std::array<std::array<float, 2>, 2> spans{{{x0, x1}, {0, 0}}};
-            if (!state.empty() && y == 456) {
-                spans = {{{x0, std::min(x1, gap_a)}, {std::max(x0, gap_b), x1}}};
-            }
-            for (auto span : spans) {
-                if (span[1] <= span[0]) continue;
-                const auto p = canopy::project(width_, height_, left, span[0], y), q = canopy::project(width_, height_, left, span[1], y);
-                lv_draw_line_dsc_t line;
-                lv_draw_line_dsc_init(&line);
-                line.p1 = {int32_t(std::lround(p.x)), int32_t(std::lround(p.y))};
-                line.p2 = {int32_t(std::lround(q.x)), int32_t(std::lround(q.y))};
-                line.width = picked ? std::max(2, height_ / 270) : std::max(1, height_ / 360);
-                line.color = color(picked || (left && bf.arm == 1) ? th.accent : rest);
-                const float taper = std::clamp((span[0] - 126) / 126, 0.0f, 1.0f);
-                line.opa = opacity((1 - taper * taper) * (picked ? 1 - menu_progress_ : 0.8f * v.rail_dim));
-                lv_draw_line(layer, &line);
-            }
-        }
-    }
-    // Original two-track layout and labels. No FC flags, no invented readings.
-    const char* battery_label = bf.have_pack_v && !bf.have_cell_v ? "PACK" : "CELL";
-    const auto rc = model_.rc_signal(now_);
-    const float label_width = left ? text_.design_advance(battery_label, canopy::kTextLabel) :
-        std::max(text_.design_advance(rc.label(), canopy::kTextLabel), text_.design_advance("VIDEO", canopy::kTextLabel));
-    const float start = 14 + label_width + 12;
-    text_.panel(layer, left ? battery_label : rc.label(), left, 14, 527, canopy::kTextLabel, !left, th.text, content);
-    text_.panel(layer, left ? "SAG" : "VIDEO", left, 14, 537, canopy::kTextLabel, !left, th.accent, content);
-    const float cell_level = bf.have_cell_v ? std::clamp((bf.cell_v - 3.3f) / 0.9f, 0.0f, 1.0f) : 0;
-    track(layer, left, start, 271, 525, 9, 20, left ? cell_level : rc.level(), th.data, content);
-    // Match Kestrel's seven-rung visual ladder; retain the raw MCS in the row.
-    constexpr int ladder[] = {1, 2, 5, 7, 8, 10, 12};
-    int rung = 0;
-    if (!left && t.link_valid(now_)) for (int value : ladder) if (t.mcs >= value) ++rung;
-    const float sag = bf.have_cell_v ? std::clamp((cell_peak_ - bf.cell_v) / 0.5f, 0.0f, 1.0f) : 0;
-    track(layer, left, start, 271, 534, 4, left ? 20 : 7, left ? sag : float(rung) / 7, th.accent, content);
-    if (!state.empty()) {
-        text_.panel(layer, state, left, state_x, 456 + canopy::kTextState / f.U / 2,
-                    canopy::kTextState, !left, left && bf.arm == 1 ? th.accent : th.quiet, idle ? v.mark : content);
-    }
-    if (!model_.show_details) return;
-    if (left) {
-        const std::string mode = bf.have_mode ? std::string("\xee\x80\x80   ") +
-            std::string(bf.mode, std::find(bf.mode, bf.mode + sizeof(bf.mode), '\0')) : "\xee\x80\x80   FC TELEMETRY --";
-        text_.panel(layer, mode, true, 14, 560, canopy::kTextRow, false, bf.have_mode ? th.text : th.quiet, content);
-        std::string vrx = "\xee\x80\x81   " + (t.fresh(now_) ? number(t.cpu_temperature_x100 / 100.0f, "VRX %.0fC") : "VRX --C");
-        if (t.fresh(now_) && t.voltage_mv > 0) vrx += "  \xe2\x80\xa2 " + number(t.voltage_mv / 1000.0f, "%.1fV");
-        text_.panel(layer, vrx, true, 14, 584, canopy::kTextRow, false, th.text, content);
-    } else {
-        const std::string frequency = (t.link_valid(now_) ? "FREQ RAW " + std::to_string(t.frequency_raw) : "FREQ RAW --") + std::string("   \xee\x80\x80");
-        text_.panel(layer, frequency, false, 14, 560, canopy::kTextRow, true, th.text, content);
-        const std::string mcs = (t.link_valid(now_) ? "VRX  MCS " + std::to_string(t.mcs) : "VRX  MCS --") + std::string("   \xee\x80\x81");
-        text_.panel(layer, mcs, false, 14, 584, canopy::kTextRow, true, th.text, content);
-    }
-}
-void View::draw_status(lv_layer_t* layer) {
-    const auto& th = hud_theme_at(model_.theme);
-    const std::string title = "KESTREL";
-    text_.canvas(layer, title, (width_ - text_.advance(title) * 48 / canopy::kFontPixels) / 2,
-                 height_ * 0.39f, 48, false, th.text, 0.9f);
-    const auto message = model_.status(now_);
-    text_.canvas(layer, message, (width_ - text_.advance(message) * 20 / canopy::kFontPixels) / 2,
-                 height_ * 0.44f, 20, false, th.quiet, 1);
+void View::draw_hud(lv_layer_t* layer, size_t index) {
+    const auto* image = hud_->image(index); if (!image || !model_.hud_visible()) return;
+    const auto& r = hud_layout_.regions.at(index);
+    if (menu_progress_ > 0 && ((r.role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
+                             (r.role == hud_ipc::Role::RightWing && active_menu_side_ == 1))) return;
+    lv_draw_image_dsc_t d; lv_draw_image_dsc_init(&d); d.src = image; d.opa = LV_OPA_COVER;
+    lv_area_t area{int32_t(r.x), int32_t(r.y), int32_t(r.x + r.width - 1), int32_t(r.y + r.height - 1)};
+    lv_draw_image(layer, &d, &area);
 }
 void View::draw_picker(lv_layer_t* layer) {
     const auto& th = hud_theme_at(model_.theme);
@@ -418,6 +244,9 @@ void View::draw_menu(lv_layer_t* layer) {
 void View::update(uint64_t now) {
     text_.begin_frame();
     now_ = now;
+    hud_->update(controller_.hud_data(now), now);
+    sync_hud_objects();
+    const bool hud_changed = hud_revision_ != hud_->revision();
     const float dt = last_tick_ ? std::min(0.1f, float(now - last_tick_) / 1000000) : 0;
     last_tick_ = now;
     const bool unfolded = model_.menu_open && model_.stage != MenuStage::Pick;
@@ -428,7 +257,7 @@ void View::update(uint64_t now) {
     if (model_.menu_open && (menu_progress_ == 0 || (unfolded && menu_progress_ == 1))) prepare_menu_snapshot();
     const float target = unfolded ? 1 : 0;
     const auto old_reveal = menu_reveal(menu_progress_);
-    const float next = menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f);
+    const float next = model_.hud_visible() ? menu_progress_ + std::clamp(target - menu_progress_, -dt / 0.24f, dt / 0.24f) : 0;
     const bool moving = next != menu_progress_;
     const bool wing_visibility_changed = (menu_progress_ == 0) != (next == 0);
     animating_ = moving || model_.visual.animating;
@@ -445,10 +274,10 @@ void View::update(uint64_t now) {
     const auto& t = model_.backend.vrx;
     const auto& flight = model_.backend.flight;
     const bool flight_fresh = flight.stamp_us && now >= flight.stamp_us && now - flight.stamp_us < 2000000;
-    if (flight_fresh && flight.have_cell_v) cell_peak_ = std::max(cell_peak_, flight.cell_v);
     const bool fresh = t.fresh(now), valid = t.link_valid(now);
     const bool hud_visible = model_.hud_visible();
-    for (auto* panel : panels_) hidden(panel, !hud_visible);
+    for (size_t i = 0; i < hud_objects_.size(); ++i)
+        hidden(hud_objects_[i], !hud_visible || (hud_layout_.regions[i].role == hud_ipc::Role::Status && valid));
     const bool appearance = !initialized_ || old_theme_ != model_.theme || old_fresh_ != fresh || old_valid_ != valid || old_details_ != model_.show_details || old_hud_visible_ != hud_visible;
     const bool data = !initialized_ || model_.backend.flight_version != flight_version_ || flight_fresh != old_flight_fresh_ ||
         t.connected != presented_.connected || t.mcs != presented_.mcs ||
@@ -480,12 +309,12 @@ void View::update(uint64_t now) {
         }
     }
     if (appearance || menu) lv_obj_invalidate(picker_);
-    if (appearance || data || model_.visual.animating || (menu && next == 0))
-        for (auto* p : panels_) lv_obj_invalidate(p);
-    else if (wing_visibility_changed) lv_obj_invalidate(panels_[active_menu_side_]);
-    hidden(status_, valid || !hud_visible);
-    if (!valid) {
-        if (appearance || data) lv_obj_invalidate(status_);
+    if (appearance || hud_changed || (menu && next == 0)) {
+        for (auto* object : hud_objects_) lv_obj_invalidate(object);
+    } else if (wing_visibility_changed) {
+        for (size_t i = 0; i < hud_objects_.size(); ++i)
+            if ((hud_layout_.regions[i].role == hud_ipc::Role::LeftWing && active_menu_side_ == 0) ||
+                (hud_layout_.regions[i].role == hud_ipc::Role::RightWing && active_menu_side_ == 1)) lv_obj_invalidate(hud_objects_[i]);
     }
     presented_ = t; initialized_ = true;
     old_fresh_ = fresh; old_valid_ = valid; old_theme_ = model_.theme;
@@ -494,5 +323,6 @@ void View::update(uint64_t now) {
     old_hud_visible_ = hud_visible;
     rejected_inputs_ = model_.rejected_inputs;
     flight_version_ = model_.backend.flight_version; old_flight_fresh_ = flight_fresh;
+    hud_revision_ = hud_->revision();
 }
 } // namespace kestrel_ui

@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
             kestrel_ui::Display display(1920, 1080, "");
             kestrel_ui::Model model;
             kestrel_ui::Controller controller(model);
-            kestrel_ui::View view(model, 1920, 1080, argv[1]);
+            kestrel_ui::View view(controller, 1920, 1080, argv[1]);
             uint64_t now = 1000000;
             for (int frame = 0; frame < 240; ++frame) {
                 now += 40000;

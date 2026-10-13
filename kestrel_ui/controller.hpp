@@ -6,6 +6,7 @@ class Controller {
 public:
     explicit Controller(Model& model) : model_(model) {}
     Model& model() { return model_; }
+    const Model& model() const { return model_; }
     void tick(uint64_t now);
     void key(Key key, bool repeat = false);
     void open_menu();

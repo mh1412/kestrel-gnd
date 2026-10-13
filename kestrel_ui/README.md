@@ -1,6 +1,7 @@
 # KestrelUI: initial standalone software frontend
 
-An independent `kestrel-ui` process for the standard Ascent VRX's stock kernel.
+Independent `kestrel-ui` and passive `kestrel-hud` processes for the standard
+Ascent VRX's stock kernel.
 It replaces the display/telemetry role of `GlassesUI` during a bounded test,
 while `ar_ldy_gnd` and `daemon_sdio` continue running. The eventual goal is to
 connect this frontend to a fully ported Kestrel receiver core through a new
@@ -9,6 +10,9 @@ backend adapter.
 ## Implemented
 
 - LVGL **9.2.2** software rendering, one UI thread, no GL/GBM/DRM/FFmpeg dependency.
+- MVC UI/controller separation and a separate passive HUD renderer. The UI owns
+  input, preferences and `fb0`; the HUD receives prepared data and renders cropped
+  leased shared buffers. HUD crashes/restarts preserve UI menu/controller state.
 - Original canopy ground geometry, slant/perspective projection and color themes.
 - Original **Chakra Petch SemiBold** glyphs, kerning, 40px ink/64px cell/baseline 48,
   projected through the same 3D panel transforms as the GLES text quads.
@@ -84,6 +88,14 @@ ui/canopy.hpp                 Shared GLES/software geometry and link animation
 ui/projective.hpp             Graphics-free inverse projective A8 sampler
 ui/frame_cadence.hpp          Absolute frame deadlines / overrun skipping
 kestrel_ui/model.*           Graphics-free UI state and initial local menu
+kestrel_ui/controller.*      UI actions, transactions, scene policy and HUD data preparation
+kestrel_ui/backend_state.hpp Receiver/VTX/FC/serial data independent of the UI model
+kestrel_ui/hud_data.*        Display-ready input for a passive HUD renderer
+kestrel_ui/hud_view.*        Passive LVGL/CPU Canopy rendering
+kestrel_ui/hud_protocol.*    Bounded versioned local message/fd handoff
+kestrel_ui/hud_buffer.*      Shared cropped ARGB buffers with explicit slot leases
+kestrel_ui/hud_source.*      UI compositor adapter, renderer supervision and test reference
+kestrel_ui/hud_main.cpp      kestrel-hud process; no backend/input/framebuffer access
 kestrel_ui/input.*           Terminal/evdev/stock keys and local control socket
 kestrel_ui/preferences.*     Validated, atomic local UI-preference storage
 kestrel_ui/stock_protocol.*  Bounded stock GUI framing and telemetry decoder
@@ -213,6 +225,11 @@ file build-ui-arm64/kestrel_ui/kestrel-ui
 toolchain. A relocated/extracted compiler can additionally need `-B` search
 paths in **C, CXX and ASM** flags; LVGL includes preprocessed assembly units.
 Static linking avoids requiring the stock glibc 2.25/libstdc++ symbol versions.
+Both `kestrel-ui` and `kestrel-hud` are built/installed. Keep them in the same
+directory: the UI launches its sibling HUD executable by default. An explicitly
+selected compatible renderer can use `--hud-executable /path/to/kestrel-hud`.
+`KESTREL_UI_RENDERER=lvgl` selects the currently implemented build backend;
+the GPU implementation remains a future adapter.
 Use `Release` for device performance measurements: the size-optimized build was
 substantially slower in the CPU renderer.
 Generate panel masks using the **host** assetgen executable, not the cross-built
@@ -241,7 +258,7 @@ See [animation measurements and remaining cold hitches](../docs/kestrel-ui-anima
 
 ## Bounded device replacement
 
-Copy the ARM64 executable, both matching-resolution masks and
+Copy both ARM64 executables (`kestrel-ui` and `kestrel-hud`), both matching-resolution masks and
 the host-generated **`canopy-font.kuf`**, **`canopy-font-OFL.txt`**, and
 `test-ascent-ui.sh` into a new `/tmp/kestrel-ui-*` directory using your normal
 authenticated device transport. Make the executable runnable. First run an
@@ -266,6 +283,12 @@ The harness:
 4. Saves `ui.log` and `overlay.pam`; verifies framebuffer readback on exit.
 5. Checks original radio/backend PIDs and resumes the original supervisor's
    framebuffer reload/relaunch path, recreating GlassesUI.
+
+The UI alone maps/locks the physical framebuffer and owns the stock key socket.
+The HUD uses a private socket pair and shared-memory descriptor; no pixels cross
+the socket. The 1080p cropped two-slot buffer totals about 6.86 MiB. Read
+[MVC/process contracts and validation](../docs/kestrel-ui-mvc.md) for ownership,
+recovery and gallery visibility policy.
 
 The wrapper does not edit startup, persistent settings or firmware. Its normal
 cleanup and shell error/signal traps restore the stock launcher; this is a test

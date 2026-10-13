@@ -1,5 +1,7 @@
 #pragma once
 #include "model.hpp"
+#include "controller.hpp"
+#include "hud_source.hpp"
 #include "perspective_text.hpp"
 #include "lvgl.h"
 #include <string>
@@ -9,21 +11,21 @@
 namespace kestrel_ui {
 class View {
 public:
-    View(const Model& model, int width, int height, const std::string& assets);
+    View(const Controller& controller, int width, int height, const std::string& assets, HudSource* hud = nullptr);
     ~View();
     void update(uint64_t now);
-    size_t text_cache_bytes() const { return text_.cached_bytes(); }
-    uint64_t text_rasterizations() const { return text_.rasterizations(); }
+    size_t text_cache_bytes() const { return text_.cached_bytes() + hud_->cache_bytes(); }
+    uint64_t text_rasterizations() const { return text_.rasterizations() + hud_->rasters(); }
     bool animating() const { return animating_; }
     uint64_t menu_snapshots() const { return menu_snapshot_count_; }
 private:
-    struct Asset {
-        std::vector<uint8_t> pixels;
-        lv_image_dsc_t image{};
-        int x = 0, y = 0;
-        void load(const std::string& path, int width, int height);
-    };
+    const Controller& controller_;
     const Model& model_;
+    std::unique_ptr<HudSource> owned_hud_;
+    HudSource* hud_ = nullptr;
+    hud_ipc::Layout hud_layout_;
+    uint64_t hud_revision_ = 0;
+    std::vector<lv_obj_t*> hud_objects_;
     std::optional<Model> menu_preview_;
     int width_, height_;
     PerspectiveText text_;
@@ -32,7 +34,6 @@ private:
     bool initialized_ = false, old_fresh_ = false, old_valid_ = false;
     bool old_flight_fresh_ = false;
     uint64_t flight_version_ = 0;
-    float cell_peak_ = 0;
     int old_theme_ = -1, old_selected_ = -1, old_tab_ = -1;
     uint64_t menu_version_ = 0;
     uint64_t rejected_inputs_ = 0;
@@ -48,17 +49,14 @@ private:
     uint64_t menu_snapshot_count_ = 0;
     uint64_t menu_snapshot_checked_us_ = 0;
     uint64_t last_tick_ = 0;
-    lv_obj_t *screen_ = nullptr, *panels_[2]{}, *status_ = nullptr, *menu_ = nullptr, *picker_ = nullptr;
-    Asset assets_[2];
-    void draw_panel(lv_layer_t* layer, bool left);
+    lv_obj_t *screen_ = nullptr, *menu_ = nullptr, *picker_ = nullptr;
+    void sync_hud_objects();
+    void draw_hud(lv_layer_t* layer, size_t region);
     void draw_menu(lv_layer_t* layer);
     lv_area_t menu_reveal(float progress) const;
-    void draw_status(lv_layer_t* layer);
     void draw_picker(lv_layer_t* layer);
     void prepare_menu_snapshot();
     void drop_menu_snapshot();
-    void track(lv_layer_t* layer, bool left, float start, float end, float y,
-               float height, int segments, float filled, const float* rgb, float alpha);
     static void draw_event(lv_event_t* event);
 };
 } // namespace kestrel_ui

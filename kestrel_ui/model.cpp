@@ -16,11 +16,6 @@ MenuRow choice(std::string id, std::string name, int current, std::vector<std::s
     return {std::move(name), value, true, std::move(id), std::move(help), std::move(options)};
 }
 }
-uint64_t monotonic_us() {
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return uint64_t(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
-}
 const char* key_name(Key key) {
     static const char* names[] = {"menu", "up", "down", "left", "right", "enter", "back", "quit"};
     return names[static_cast<unsigned>(key)];
@@ -173,7 +168,7 @@ std::string Model::describe() const {
     out << "OK open=" << menu_open << " stage=" << (!menu_open ? "closed" : stage == MenuStage::Pick ? "pick" : stage == MenuStage::Browse ? "browse" : "edit")
         << " side=" << (side ? "air" : "goggle") << " tab=" << tab_name(tab) << " row=" << selected
         << " theme=" << hud_theme_at(theme).name << " fps=" << fps << " details=" << show_details << " repeat=" << key_repeat
-        << " keys=" << key_count << " last=" << last_key;
+        << " keys=" << key_count << " last=" << last_key << " hud_pid=" << hud_pid << " hud_restarts=" << hud_restarts;
     return out.str();
 }
 } // namespace kestrel_ui

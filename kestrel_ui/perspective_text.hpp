@@ -7,7 +7,7 @@
 namespace kestrel_ui {
 class PerspectiveText {
 public:
-    PerspectiveText(const std::string& font_path, int width, int height);
+    PerspectiveText(const std::string& font_path, int width, int height, size_t budget = 1024 * 1024);
     ~PerspectiveText();
     void begin_frame();
     float advance(const std::string& text) const { return font_.advance(text); }
@@ -29,6 +29,7 @@ private:
     FontAtlas font_;
     int width_, height_;
     size_t bytes_ = 0;
+    size_t budget_;
     uint64_t clock_ = 0, rasterizations_ = 0;
     std::map<Key, Cached> cache_;
     void paint(lv_layer_t* layer, const std::string& text, const std::array<canopy::Point, 4>& quad,

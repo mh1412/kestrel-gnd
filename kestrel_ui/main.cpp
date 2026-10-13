@@ -29,6 +29,7 @@ struct Options {
     int width = 1920, height = 1080, port = 2765, fps = 25, seconds = 0;
     bool demo = false, show_menu = false, stock_keys = false, interactive = false, fps_override = false;
     std::string assets, framebuffer, screenshot, input, control, config, send_key;
+    std::string hud_executable;
 };
 Options options(int argc, char** argv) {
     Options o;
@@ -47,6 +48,7 @@ Options options(int argc, char** argv) {
         else if (arg == "--control") o.control = value();
         else if (arg == "--config") o.config = value();
         else if (arg == "--send-key") o.send_key = value();
+        else if (arg == "--hud-executable") o.hud_executable = value();
         else if (arg == "--port") o.port = std::stoi(value());
         else if (arg == "--width") o.width = std::stoi(value());
         else if (arg == "--height") o.height = std::stoi(value());
@@ -64,6 +66,7 @@ Options options(int argc, char** argv) {
                       "  --stock-keys          Receive validated menu keys on localhost UDP 6222\n"
                       "  --control SOCKET      Local UI-control datagram socket (owner-only)\n"
                       "  --config FILE         Save local UI preferences on OK; no backend settings\n"
+                      "  --hud-executable FILE Passive renderer executable (default: sibling kestrel-hud)\n"
                       "  --control SOCKET --send-key KEY  Send menu/up/down/left/right/enter/back/status\n"
                       "  --control SOCKET --interactive-control  SSH keyboard controller; Q exits client\n"
                       "  stdin: Enter/M opens; arrows/WASD choose/navigate/edit; Esc backs/cancels; Q quits UI\n"
@@ -81,6 +84,13 @@ Options options(int argc, char** argv) {
         o.fps < 1 || o.fps > 60 || o.port < 1 || o.port > 65535 || o.seconds < 0 || o.seconds > 86400)
         throw std::runtime_error("Invalid resolution, cadence, port or duration");
     return o;
+}
+std::string hud_executable(const Options& o) {
+    if (!o.hud_executable.empty()) return o.hud_executable;
+    char path[4096]; const ssize_t n = readlink("/proc/self/exe", path, sizeof(path));
+    if (n <= 0 || n == ssize_t(sizeof(path))) throw std::runtime_error("Cannot locate sibling HUD executable");
+    const std::string executable(path, size_t(n));
+    return executable.substr(0, executable.find_last_of('/') + 1) + "kestrel-hud";
 }
 }
 int main(int argc, char** argv) {
@@ -113,7 +123,8 @@ int main(int argc, char** argv) {
             int applied_fps = model.fps;
             if (!o.config.empty()) controller.save_preferences = [&](const kestrel_ui::UiPreferences& p) { kestrel_ui::store_preferences(o.config, p); };
             if (o.show_menu) controller.open_menu();
-            kestrel_ui::View view(model, display.width(), display.height(), o.assets);
+            kestrel_ui::HudClient hud(display.width(), display.height(), o.assets, hud_executable(o));
+            kestrel_ui::View view(controller, display.width(), display.height(), o.assets, &hud);
             kestrel_ui::Input input(o.input, o.control, o.stock_keys);
             model.input_sources = input.sources(); model.control_path = o.control;
             const uint64_t started = kestrel_ui::monotonic_us();
@@ -162,6 +173,7 @@ int main(int argc, char** argv) {
                     // may not yet be due after variable update/draw work; force
                     // this tick's damage out rather than skipping its pose.
                     lv_refr_now(display.lv_display());
+                    model.hud_pid = hud.pid(); model.hud_restarts = hud.restarts();
                     if (view.animating()) {
                         ++animated_ticks;
                         if (display.presentations != paints_before) ++animated_paints;
@@ -194,6 +206,9 @@ int main(int argc, char** argv) {
                                     (unsigned long long)sorted[(sorted.size() - 1) * 95 / 100], (unsigned long long)sorted.back());
                     }
                     const auto& serial = model.backend.serial;
+                    std::printf("HUD pid=%d frames=%llu restarts=%llu render_us=%llu shared_bytes=%zu\n", hud.pid(),
+                        (unsigned long long)hud.frames(), (unsigned long long)hud.restarts(),
+                        (unsigned long long)hud.render_us(), hud.layout().bytes() * 2);
                     if (serial.envelopes || serial.vendor_notifications) {
                         const auto& flight = model.backend.flight;
                         const auto rc = model.rc_signal(now);

@@ -14,6 +14,7 @@ HudData Controller::hud_data(uint64_t now) const {
     const bool fresh = f.stamp_us && now >= f.stamp_us && now - f.stamp_us < 2000000;
     HudData data;
     data.enabled = m.hud_visible(); data.details = m.show_details; data.theme = m.theme;
+    if (!data.enabled) { data.show_status = false; return data; }
     data.show_status = !t.link_valid(now); data.status = m.status(now);
     auto visual = m.visual;
     if (!visual.visible && m.menu_open) {
