@@ -9,6 +9,7 @@
 #include "kestrel_gnd_config.h"
 #include "radio/ar8030_link.hpp"
 #include "radio/native_pairing.hpp"
+#include "radio/ar8030_policy.hpp"
 #include "system/air/power.hpp"
 #include "hud/lvgl/display.hpp"
 #include "hud/lvgl/input.hpp"
@@ -157,7 +158,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         o.platform.display_width = mode.current.width();
         zones::load(settings);
         o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
-        o.link.max_mcs=settings.get(radio::setting::ar8030_max_mcs);
+        ar8030_load_policy(o.link, settings, bsp::board().radio.default_max_bw_mhz);
         o.link.tx_power_mw=o.link.tx_power_want_mw=settings.get(radio::setting::tx_power_mw);
         radio::Model radio_model(settings);
         bus::Waker updates;
