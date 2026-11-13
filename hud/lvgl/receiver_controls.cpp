@@ -91,9 +91,21 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     choice("Video Mode",0,true,false,{{0,"1920x1080 @ 60"}},"This native display/decoder currently supports 1080p60 only.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
            "Requires an fpvOS air unit.");
-    auto offer=ar_pwr_offered(a.prj,a.fine); std::vector<ReceiverChoice> powers;
-    for(int i=0;i<offer.n;++i) powers.push_back({offer.mw[i],kArPwrLevels[ar_pwr_index(offer.mw[i])].label});
-    choice("power",a.tx_power_want_mw,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,"The radio does not expose power control.");
+    // Share the legacy menu's mode/level mapping and per-air-unit limits.
+    const bool automatic=ar_pwr_is_auto(a.tx_power_want_mw);
+    int tops[kArPwrTopsMax];
+    const int count=ar_pwr_tops(a.prj,a.fine,automatic,tops);
+    std::vector<ReceiverChoice> powers, modes;
+    for(int i=0;i<count;++i) powers.push_back({tops[i],kArPwrLevels[ar_pwr_index(tops[i])].label});
+    for(int mode=0;mode<2;++mode)
+        if(ar_pwr_pick(a.prj,a.fine,mode,ar_pwr_top(a.tx_power_want_mw))>=0)
+            modes.push_back({mode,mode?"AUTO":"FIXED"});
+    choice("power_mode",automatic,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,modes,
+           "The radio does not expose power control.");
+    choice("power",ar_pwr_top(a.tx_power_want_mw),a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,
+           "The radio does not expose power control.");
+    choice("max_bw",g.max_bw_mhz,true,g.radio_fw==1,
+           {{0,"AUTO"},{5,"5 MHz"},{10,"10 MHz"},{20,"20 MHz"},{40,"40 MHz"}},"Requires Open8030.");
     choice("standby",u.standby,u.standby_n,true,{{0,"OFF"},{1,"ON"}});
     std::vector<ReceiverChoice> mcs{{-1,"AUTO"}};
     for(int i=0;i<12;++i) mcs.push_back({i,"MCS "+std::to_string(i)});
@@ -125,7 +137,15 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
         throw std::invalid_argument("Unsupported control value");
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
-    else if(id=="power") air_.set_tx_power(value);
+    else if(id=="power" || id=="power_mode") {
+        const auto a=air_.state();
+        const bool mode=id=="power_mode" ? value!=0 : ar_pwr_is_auto(a.tx_power_want_mw);
+        const int top=id=="power" ? value : ar_pwr_top(a.tx_power_want_mw);
+        const int encoded=ar_pwr_pick(a.prj,a.fine,mode,top);
+        if(encoded<0) throw std::invalid_argument("Unsupported TX power mode");
+        air_.set_tx_power(encoded);
+    }
+    else if(id=="max_bw") ground_.set_max_bandwidth(value);
     else if(id=="standby") unit_.set_standby(value!=0);
     else if(id=="max_mcs") ground_.set_max_mcs(value);
     else {
