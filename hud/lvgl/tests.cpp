@@ -69,6 +69,28 @@ int main(int argc, char** argv) {
         t.stamp_us = 1000000; t.connected = true; t.mcs = -1;
         t.voltage_mv = 11512; t.cpu_temperature_x100 = 4889;
         check(!t.fresh(3000000) && !t.fresh(999999), "Telemetry freshness bounds");
+        {
+            // The receiver's own temperature: on its own stamp, link or none.
+            Model local; local.backend.vrx.cpu_temperature_x100 = 5300; local.backend.vrx.local_stamp_us = 1000000;
+            Controller lc(local);
+            const auto shown = lc.hud_data(2000000, false).panels[0].detail2;
+            check(shown.find("VRX 53C") != std::string::npos, "VRX temperature shown without a link");
+            check(lc.hud_data(7000000, false).panels[0].detail2.find("VRX --C") != std::string::npos,
+                  "VRX temperature stale 5 s after its last reading");
+        }
+        {
+            // Armed colours both canopies' rules (the right one too, as on the
+            // VRX Pro); disarmed or not known, neither.
+            Model armed; Controller ac(armed);
+            armed.backend.flight.stamp_us = 1000000; armed.backend.flight.arm = 1;
+            auto d = ac.hud_data(1500000, false);
+            check(d.panels[0].armed && d.panels[1].armed, "Armed: both canopies armed");
+            check(d.panels[0].state == "ARMED" && d.panels[1].state.empty(), "Only the left canopy says ARMED");
+            armed.backend.flight.arm = 0; d = ac.hud_data(1500000, false);
+            check(!d.panels[0].armed && !d.panels[1].armed, "Disarmed: neither canopy armed");
+            armed.backend.flight.arm = 1; d = ac.hud_data(4000000, false);
+            check(!d.panels[0].armed && !d.panels[1].armed, "Arm state gone stale: neither canopy armed");
+        }
 
         Model model;
         Controller controller(model);
@@ -155,27 +177,48 @@ int main(int argc, char** argv) {
             Model gallery;Controller gc(gallery);gc.set_scene(SceneMode::GalleryBrowse);
             gallery.backend.recordings={{"one.mp4",1},{"two.mp4",2}};
             std::string action;
-            gc.apply_receiver=[&](const std::string& id,int){action=id;return std::string("Deleting recording...");};
-            gc.key(Key::Record);
-            check(gallery.gallery_delete_name=="one.mp4" && !gallery.gallery_delete_chosen,"REC opens Cancel by default");
-            gc.key(Key::Enter);check(action.empty() && gallery.gallery_delete_name.empty(),"Default confirmation keeps the video");
+            gc.apply_receiver=[&](const std::string& id,int){action=id;return std::string("Action requested");};
             gc.key(Key::Record);gc.key(Key::Record,true);
-            check(!gallery.gallery_delete_name.empty(),"REC repeat does not dismiss the prompt");
-            gc.key(Key::Right);check(gallery.gallery_selected==0 && gallery.gallery_delete_chosen,"Confirmation arrows do not navigate gallery");
-            gc.key(Key::Back);check(action.empty() && gallery.scene==SceneMode::GalleryBrowse,"Back cancels without leaving gallery");
-            gc.key(Key::Record);gc.key(Key::Right);gc.key(Key::Left);gc.key(Key::Enter);
-            check(action.empty(),"Left selects Cancel");
-            gc.key(Key::Record);gc.key(Key::Right);
-            std::reverse(gallery.backend.recordings.begin(),gallery.backend.recordings.end());
+            check(gallery.gallery_action_name=="one.mp4" && gallery.gallery_delete_name.empty(),"REC opens actions, not deletion; held REC is ignored");
+            check(gallery.gallery_action==RecordingAction::Export,"Actions default to export");
             gc.key(Key::Enter);
-            check(action=="delete:one.mp4" && gallery.gallery_delete_name.empty(),"Deletion stays pinned to confirmed filename across catalog refresh");
+            check(action.empty() && gallery.feedback=="HUD export unavailable" && !gallery.gallery_action_name.empty(),"Unimplemented export is visible but cannot dispatch");
+            gc.key(Key::Down);gc.key(Key::Down,true);
+            check(gallery.gallery_selected==0 && gallery.gallery_action==RecordingAction::Delete,"Actions arrows do not move gallery selection");
+            gc.key(Key::Enter);
+            check(gallery.gallery_delete_name=="one.mp4" && !gallery.gallery_delete_chosen,"Delete action opens confirmation on Cancel");
+            gc.key(Key::Enter);
+            check(action.empty() && gallery.gallery_delete_name.empty() && !gallery.gallery_action_name.empty(),"Cancel returns to recording actions");
+            gc.key(Key::Enter);gc.key(Key::Right);gc.key(Key::Back);
+            check(action.empty() && gallery.gallery_delete_name.empty() && gallery.scene==SceneMode::GalleryBrowse,"Back cancels confirmation without leaving actions");
+            gc.key(Key::Back);check(gallery.gallery_action_name.empty(),"Back closes actions");
+            gc.key(Key::Record);gc.key(Key::Right);gc.key(Key::Enter);gc.key(Key::Right);gc.key(Key::Left);gc.key(Key::Enter);
+            check(action.empty(),"LEFT selects Cancel before confirming deletion");
+            gc.key(Key::Back);gc.key(Key::Record);
+            std::reverse(gallery.backend.recordings.begin(),gallery.backend.recordings.end());
+            gc.key(Key::Down);gc.key(Key::Enter);gc.key(Key::Right);gc.key(Key::Enter);
+            check(action=="delete:one.mp4" && gallery.gallery_delete_name.empty() && gallery.gallery_action_name.empty(),"Deletion remains pinned across catalog refresh and closes dialogs");
+            gallery.backend.controls["recording_export"].known=true;
+            gallery.backend.controls["recording_export"].enabled=true;
+            gc.key(Key::Record);gc.key(Key::Down);gc.key(Key::Up);gc.key(Key::Enter);
+            check(action=="export:two.mp4" && gallery.gallery_action_name.empty(),"Ready export dispatches selected filename");
+            gallery.backend.export_busy=true;action.clear();const auto selected=gallery.gallery_selected;
+            gc.key(Key::Down);gc.key(Key::Enter);gc.key(Key::Record);gc.key(Key::Menu);
+            check(action.empty() && gallery.gallery_selected==selected && gallery.scene==SceneMode::GalleryBrowse,"Export blocks conflicting gallery actions");
+            gc.key(Key::Back);check(action=="export_cancel","Back requests export cancellation");
+            gallery.backend.export_busy=false;
             gc.apply_receiver=[](const std::string&,int)->std::string{throw std::runtime_error("Storage busy");};
-            gc.key(Key::Record);gc.key(Key::Right);gc.key(Key::Enter);
-            check(gallery.feedback=="Storage busy" && gallery.gallery_delete_name.empty(),"Deletion errors stay in gallery");
+            gc.key(Key::Record);gc.key(Key::Enter);
+            check(gallery.feedback=="Storage busy" && !gallery.gallery_action_name.empty(),"Export errors keep actions available");
+            gc.key(Key::Right);gc.key(Key::Enter);gc.key(Key::Right);gc.key(Key::Enter);
+            check(gallery.feedback=="Storage busy" && gallery.gallery_action_name.empty(),"Deletion errors return to gallery");
+            gc.key(Key::Record);gc.key(Key::Record);
+            check(gallery.gallery_action_name.empty(),"REC toggles actions closed");
             gallery.backend.recordings.clear();gc.key(Key::Record);
-            check(gallery.gallery_delete_name.empty(),"Empty gallery cannot open deletion");
+            check(gallery.gallery_action_name.empty(),"Empty gallery cannot open actions");
+            gallery.backend.recordings={{"one.mp4",1}};gc.key(Key::Record);
             gc.set_scene(SceneMode::GalleryPlayback);gc.key(Key::Record);
-            check(gallery.gallery_delete_name.empty(),"REC cannot delete during playback");
+            check(gallery.gallery_action_name.empty() && gallery.gallery_delete_name.empty(),"Scene changes dismiss actions; REC does not delete during playback");
         }
         model.key_repeat = false; const auto keys_before = model.key_count;
         controller.key(Key::Up, true); check(model.key_count == keys_before, "Disabled repeats do not move the menu");
@@ -419,7 +462,7 @@ int main(int argc, char** argv) {
             check(c.recording_text(now+67000000)=="REC 0:00","New recording resets timer");
             m.show_hud=true;
             h=c.hud_data(now+67000000);
-            check(h.panels[1].secondary.empty() && h.panels[1].detail1.find("--mW")!=std::string::npos && h.panels[1].detail2.find("--ms")!=std::string::npos,"Expired readings are not displayed as current");
+            check(h.panels[1].secondary.empty() && h.panels[1].detail1.find("mW")==std::string::npos && h.panels[1].detail2.find("ms")==std::string::npos,"Expired readings are not displayed as current");
         }
         std::puts("PASS: telemetry freshness, shared canopy/GLES geometry, projective rasterization, baked fonts and menus");
         return 0;

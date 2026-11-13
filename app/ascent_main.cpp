@@ -2,6 +2,7 @@
 // Shared native AR9311 composition root: existing radio, software HUD, platform media.
 #include "base/ltrace.hpp"
 #include "display/mode_trial.hpp"
+#include "dvr/format_card.hpp"
 #include "display/settings.hpp"
 #include "platform/software.hpp"
 #include "platform/native_panel.hpp"
@@ -25,16 +26,74 @@
 #include "motion/imu_reader.hpp"
 #include "hal/source_decoder.hpp"
 #include "dvr/stream_player.hpp"
+#include "dvr/export_job.hpp"
+#include "hal/v4l2/find_encoder.hpp"
 #include "hud/lvgl/view.hpp"
 #include "render/software/frame_cadence.hpp"
+#include <condition_variable>
 #include <csignal>
+#include <exception>
 #include <filesystem>
+#include <fstream>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace {
 volatile sig_atomic_t interrupted = 0, menu_requested = 0;
+// Copies each UI frame's damage to the overlay plane on the other core while
+// LVGL draws the next frame into its other buffer. The only overlay producer.
+class OverlayCopier {
+public:
+    OverlayCopier(display::PlaneScreen& screen, unsigned width, unsigned height)
+        : screen_(screen), width_(width), height_(height), thread_([this] { run(); }) {}
+    ~OverlayCopier() {
+        { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
+        wake_.notify_all();
+        thread_.join();
+    }
+    // Waits for the previous copy: it reads the buffer LVGL draws into next.
+    void submit(const uint32_t* pixels, std::vector<base::Damage> damage) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait(lock, [this] { return !pending_; });
+        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
+        pixels_ = pixels; damage_ = std::move(damage); pending_ = true;
+        wake_.notify_all();
+    }
+    uint64_t copy_us() const { return copy_us_.load(); }
+private:
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            wake_.wait(lock, [this] { return stop_ || pending_; });
+            if (!pending_) return;
+            const uint32_t* pixels = pixels_;
+            const auto damage = std::move(damage_);
+            lock.unlock();
+            const auto started = kestrel_ui::monotonic_us();
+            std::exception_ptr error;
+            try { screen_.overlay_damage(pixels, width_, height_, damage); }
+            catch (...) { error = std::current_exception(); }
+            copy_us_ += kestrel_ui::monotonic_us() - started;
+            lock.lock();
+            if (error) error_ = error;
+            pending_ = false;
+            wake_.notify_all();
+        }
+    }
+    display::PlaneScreen& screen_;
+    const unsigned width_, height_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool pending_ = false, stop_ = false;
+    const uint32_t* pixels_ = nullptr;
+    std::vector<base::Damage> damage_;
+    std::exception_ptr error_;
+    std::atomic<uint64_t> copy_us_{0};
+    std::thread thread_;
+};
 void signal_handler(int signal) {
     if (signal == SIGUSR1)
         menu_requested = 1;
@@ -237,10 +296,17 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 source_exited = true;
             });
         }
+        const auto export_executable=std::filesystem::read_symlink("/proc/self/exe").parent_path()/"kestrel-export";
+        auto exporter=std::make_unique<dvr::ExportJob>(o.recordings,export_executable.string(),dvr::ExportJob::Media{
+            [&](bool on){source_decoder->suspend(on);},[&]{return source_decoder->suspended();}});
+        const auto export_encoder=hal::find_hevc_encoder();
+        const bool export_available=exporter->available() && access("/dev/ar9311-ge2d",R_OK|W_OK)==0 && !export_encoder.empty();
+        uint64_t export_revision=0;
         lv_init();
         struct LvLifetime { ~LvLifetime() { lv_deinit(); } } lv_lifetime;
         lv_tick_set_cb([] { return uint32_t(kestrel_ui::monotonic_us() / 1000); });
-        kestrel_ui::Display display(screen_w, screen_h, "");
+        kestrel_ui::Display display(screen_w, screen_h, "", 0, 2);
+        OverlayCopier copier(*receiver.screen, unsigned(screen_w), unsigned(screen_h));
         kestrel_ui::Model model;
         model.build = kestrel_gnd_build_time;
         model.version = std::string(kestrel_gnd_version) + " (" + kestrel_gnd_git_hash + ")";
@@ -259,12 +325,42 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         ascent::ChannelMenu channel_menu(radio_model.radio());
         dvr::StreamPlayer::State playback;
         uint64_t playback_checked=0;
-        kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio());
+        std::vector<kestrel_ui::ReceiverControls::VideoMode> video_modes;
+        for(int i=0;i<sky::kFpvModeCount;i++) video_modes.push_back({sky::kFpvModes[i].name,sky::kFpvModes[i].need});
+        kestrel_ui::ReceiverControls controls(radio_model.camera(),radio_model.encoder(),radio_model.air_radio(),radio_model.air_unit(),radio_model.radio(),
+                                              std::move(video_modes));
         std::vector<kestrel_ui::ReceiverChoice> screen_choices;
         for(const auto candidate:display::ascent_modes) if(receiver.screen->supports_mode(candidate) &&
             std::filesystem::is_directory(assets_root/(candidate.height==720?"1280x720":"1920x1080")))
             screen_choices.push_back({candidate.id(),candidate.label()});
+        // DVR > Format Card: what the firmware would erase, checked again when
+        // the DVR tab opens; a first OK arms it, a second within 5 s starts it.
+        dvr::format_card::Result format_info=dvr::format_card::check();
+        std::string temperature_path;
+        uint64_t temperature_next=0,temperature_search=0;
+        uint64_t format_armed_until=0,format_armed_at=0;
+        int format_armed_tab=-1,format_armed_row=-1;
+        bool formatting=false;
         controller.apply_receiver=[&](const std::string& id,int value) {
+            // Nothing opens a file on the card while it is being formatted
+            // under a receiver that keeps running.
+            if(formatting && (id=="record" || id.compare(0,5,"play:")==0 || id.compare(0,7,"delete:")==0 ||
+                              id.compare(0,7,"export:")==0))
+                throw std::runtime_error("Wait for the format to finish");
+            if(id=="export_cancel") {exporter->cancel();return std::string("Canceling export...");}
+            if(exporter->state().busy)throw std::runtime_error("Wait for export or cancel it first");
+            if(id.compare(0,7,"export:")==0) {
+                const auto rec=recorder.state();const auto play=player.state();
+                if(recorder.is_recording() || rec.finishing || play.busy || play.deleting || mode.pending)
+                    throw std::runtime_error("Stop recording/playback and finish screen changes before exporting");
+                if(access("/dev/ar9311-ge2d",R_OK|W_OK) || export_encoder.empty())
+                    throw std::runtime_error("Hardware export needs updated fpvOS firmware");
+                exporter->start(id.substr(7),{assets_root.string(),o.preferences.empty()?"-":o.preferences,
+                    o.platform.decoder_device,export_encoder,o.vector?"vector":"canopy"});
+                model.backend.export_busy=true;model.backend.export_percent=0;
+                model.backend.export_file=id.substr(7);model.backend.export_message="Preparing export";
+                return std::string("Export started");
+            }
             if(id=="screen_mode") {
                 if(mode.pending) {
                     mode.keep();
@@ -279,6 +375,31 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     throw std::runtime_error("Screen mode or compiled assets unavailable");
                 mode.select(display::AscentMode::from_id(value)); model.quit=mode.restart;
                 return std::string("Testing screen mode");
+            }
+            if(id=="format_card") {
+                if(formatting) throw std::runtime_error("Formatting; the receiver restarts when it is done");
+                if(recorder.is_recording() || recorder.state().finishing || player.state().busy || player.state().deleting)
+                    throw std::runtime_error("Stop recording and playback before formatting");
+                const uint64_t t=kestrel_ui::monotonic_us();
+                if(controller.armed(t)) throw std::runtime_error("Disarm before formatting");
+                if(t>=format_armed_until) {
+                    format_info=dvr::format_card::check();
+                    if(!format_info.ok) throw std::runtime_error(format_info.text);
+                    format_armed_at=t;
+                    format_armed_until=t+uint64_t(dvr::format_card::kArmMs)*1000;
+                    format_armed_tab=model.tab;format_armed_row=model.selected;
+                    return "Erases everything on the "+format_info.text+". Press OK again within 5 seconds.";
+                }
+                // A double press is not a second answer: the warning stays up.
+                if(t<format_armed_at+uint64_t(dvr::format_card::kGapMs)*1000)
+                    return "Erases everything on the "+format_info.text+". Press OK again within 5 seconds.";
+                format_armed_until=0;
+                const auto started=dvr::format_card::start();
+                if(!started.ok) throw std::runtime_error(started.text);
+                formatting=true;
+                // The helper says when the receiver restarts for it; where it
+                // does not, this receiver reads the outcome (below).
+                return started.text+".";
             }
             if(id=="record") {
                 if(player.state().deleting)throw std::runtime_error("Wait for recording deletion to finish");
@@ -344,11 +465,18 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         bool was_browsing=false; int recording_listed=0;
         int previous_bind = gnd::BIND_IDLE;
         std::string recording_error,telemetry_error,thumbnail_session,unsupported_video,held_notice;
+        // How a format (which restarted us) went, said once the screen is up.
+        // Not held for a disarmed flight controller as held_notice is: after
+        // a format there is often none linked, and it would never be said.
+        std::string start_notice=dvr::format_card::take_result();
+        uint64_t format_poll=0;
+        bool was_dvr_tab=false;
         std::vector<uint8_t> playback_hud_bytes;
         std::shared_ptr<const kestrel_ui::HudData> playback_hud;
         uint64_t profile_start = start, profile_loops = 0, profile_drawn = 0, profile_presented = 0, profile_ui_flips = 0;
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
+        uint64_t rate_start = start, rate_loops = 0, rate_slowest_us = 0, profile_copy_us = 0;
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -356,12 +484,18 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             // Pro; one tried while armed is not reverted in the air (that
             // restarts the session, radio and HDMI included) but once it has
             // landed.
-            if(controller.take_arming() && mode.pending) {
+            const bool arming=controller.take_arming();
+            if(arming && mode.pending) {
                 mode.keep();
                 settings.set(display::setting::ascent_screen_height,mode.current.height);
                 settings.set(display::setting::ascent_screen_hz,mode.current.hz);
                 settings.flush();
                 printf("menu: screen mode %s kept (armed)\n",mode.current.label().c_str());
+            }
+            // An export holds the live decoder: arming brings the video back.
+            if(arming && exporter->state().busy) {
+                exporter->cancel();
+                printf("export: canceled (armed)\n");
             }
             if(mode.pending && mode.deadline && now>=mode.deadline && controller.armed(now)) mode.deadline=now+1000000;
             if(mode.tick(now)) break;
@@ -405,6 +539,27 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             model.backend.video = {video.stamp_us, video.width, video.height, video.fps, video.latency_ms};
             const auto state = radio_model.radio().state();
             auto &telemetry = model.backend.vrx;
+            // The receiver's SoC temperature (fpvOS ar9311_temp, hwmon), once
+            // a second; looked for again every 10 s while it is not there.
+            if(now>=temperature_next) {
+                temperature_next=now+1000000;
+                if(temperature_path.empty() && now>=temperature_search) {
+                    temperature_search=now+10000000;
+                    std::error_code ec;
+                    for(const auto& entry:std::filesystem::directory_iterator("/sys/class/hwmon",ec)) {
+                        std::ifstream name(entry.path()/"name");std::string text;
+                        if(std::getline(name,text) && text=="ar9311_temp") {temperature_path=(entry.path()/"temp1_input").string();break;}
+                    }
+                }
+                long millidegrees=0;
+                std::ifstream input(temperature_path);
+                if(!temperature_path.empty() && (input>>millidegrees) && millidegrees>-40000 && millidegrees<150000) {
+                    telemetry.cpu_temperature_x100=int(millidegrees/10);telemetry.local_stamp_us=now;
+                } else {
+                    telemetry.cpu_temperature_x100=kestrel_ui::Telemetry::unavailable;
+                    if(!temperature_path.empty()) temperature_path.clear();
+                }
+            }
             telemetry.stamp_us = state.link.last_update_ms * 1000;
             telemetry.connected = state.link.active && state.link.state == gnd::kLinkUp;
             // The video arrives on RX; link.mcs is this receiver's uplink TX MCS.
@@ -441,6 +596,13 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 if(screen_control.choices.size()<2) screen_control.reason="Additional modes require compatible firmware, monitor and compiled assets.";
             }
 
+            const auto exporting=exporter->state();
+            model.backend.export_busy=exporting.busy;model.backend.export_percent=exporting.percent;
+            model.backend.export_file=exporting.file;model.backend.export_message=exporting.message;
+            auto& export_control=model.backend.controls["recording_export"];
+            export_control={};export_control.known=true;export_control.action=true;
+            export_control.enabled=!exporting.busy && export_available;
+            if(exporting.revision!=export_revision){export_revision=exporting.revision;model.feedback=exporting.message;}
             region_menu.update(model.backend);
             channel_menu.update(model.backend,now,model.channel_open);
             if(!playback_checked || now-playback_checked>=250000) {
@@ -493,6 +655,33 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             rec.text=recorder.is_recording()?"STOP":recording.finishing?"SAVING":"START";
             rec.reason=recording.error.empty()?"Records the received video without re-encoding.":recording.error;
             auto& folder=model.backend.controls["folder"];folder={};folder.known=true;folder.text=o.recordings;
+            {
+                const bool dvr_tab=model.menu_open && model.side==0 && model.tab==4;
+                if(dvr_tab && !was_dvr_tab && !formatting) format_info=dvr::format_card::check();
+                was_dvr_tab=dvr_tab;
+                // Armed only while its row stays selected: leaving it, the tab
+                // or the menu takes the first press back.
+                if(format_armed_until && (!dvr_tab || model.tab!=format_armed_tab || model.selected!=format_armed_row))
+                    format_armed_until=0;
+                // The format ended while we kept running (the helper leaves a
+                // receiver up when nothing of its own is on the card), or failed
+                // before it stopped us: said, the row usable again, the gallery
+                // listing the new card.
+                if(formatting && now>=format_poll) {
+                    format_poll=now+500000;
+                    const std::string result=dvr::format_card::take_result();
+                    if(!result.empty()) {
+                        formatting=false;format_info=dvr::format_card::check();start_notice=result;
+                        player.refresh();playback_checked=0;
+                    }
+                }
+                const bool armed=now<format_armed_until;
+                auto& fmt=model.backend.controls["format_card"];fmt={};fmt.known=true;fmt.action=true;
+                fmt.enabled=format_info.ok && !formatting;
+                fmt.text=formatting?"FORMATTING":armed?"ENTER: ERASE ALL":"ENTER: FORMAT";
+                fmt.reason=format_info.ok?"Erases the "+format_info.text+" and makes it one exFAT partition for recordings. "
+                    "Settings and pairing are kept.":format_info.text+".";
+            }
             auto& space=model.backend.controls["space"];space={};space.known=true;
             space.text=std::to_string(recording.free_bytes/(1024*1024))+" MiB";
             space.reason=recording.storage_ready?"":"Storage unavailable or less than 64 MiB free.";
@@ -502,7 +691,11 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             auto notice = [&](const char* text) {
                 printf("panel: %s\n", text);
                 if (controller.armed(now)) { held_notice = text; return; }
-                if (!model.menu_open) controller.open_menu();
+                // Over the gallery it is said there: opening the menu would
+                // leave a recording playing behind it with no way to stop it.
+                const bool gallery = model.scene == kestrel_ui::SceneMode::GalleryBrowse ||
+                                     model.scene == kestrel_ui::SceneMode::GalleryPlayback;
+                if (!model.menu_open && !gallery) controller.open_menu();
                 model.feedback = text;
                 ++model.menu_version;
             };
@@ -511,11 +704,16 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 held_notice.clear();
                 notice(text.c_str());
             }
+            if (!start_notice.empty() && !controller.armed(now)) {
+                const std::string text = std::move(start_notice);
+                start_notice.clear();
+                notice(text.c_str());
+            }
             const std::string unsupported=video.rejected_us ?
                 std::to_string(video.rejected_width)+"x"+std::to_string(video.rejected_height) : std::string();
             if(unsupported!=unsupported_video) {
                 unsupported_video=unsupported;
-                if(!unsupported.empty()) notice(("Video "+unsupported+" is not supported here; the air unit must send 1080p").c_str());
+                if(!unsupported.empty()) notice(("Video "+unsupported+" cannot be shown on this screen").c_str());
             }
             if(recording.telemetry_error!=telemetry_error) {
                 telemetry_error=recording.telemetry_error;
@@ -533,15 +731,19 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     if(model.scene==kestrel_ui::SceneMode::GalleryBrowse) {
                         controller.key(kestrel_ui::Key::Record);panel->beep();continue;
                     }
+                    // Recording cannot start during playback.
+                    if(model.scene==kestrel_ui::SceneMode::GalleryPlayback) continue;
                     try {model.feedback=controller.apply_receiver("record",0);panel->beep();}
                     catch(const std::exception& e) {notice(e.what());panel->beep(platform::PanelTone::Failure);}
                 } else if (event.key == platform::PanelKey::Upgrade) {
                     notice("Button-triggered upgrade is not available yet");
                     panel->beep(platform::PanelTone::Failure);
                 } else if (event.key == platform::PanelKey::Link) {
+                    // The over-video bind overlay (model.bind_state) shows the
+                    // progress; the bind button must not open the menu.
                     if (o.radio && o.link.replay_path.empty()) {
                         radio_model.radio().bind();
-                        notice("Binding request sent");
+                        printf("panel: bind button -> binding\n");
                         panel->beep();
                     } else {
                         notice("Binding requires a running radio");
@@ -555,19 +757,25 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     }
                 }
             }
+            // The bind overlay draws from these; it replaces the menu notices
+            // so binding never pops the menu over the video.
+            model.bind_state = state.bind_state;
+            model.bind_secs_left = state.bind_secs_left;
+            model.bind_peer = state.bind_peer;
             if (state.bind_state != previous_bind) {
                 previous_bind = state.bind_state;
+                ++model.menu_version;
                 switch (state.bind_state) {
                 case gnd::BIND_RUNNING:
-                    notice("Binding: press LINK again to cancel");
+                    printf("panel: binding (press LINK again to cancel)\n");
                     panel->beep(platform::PanelTone::Notice); break;
                 case gnd::BIND_OK:
-                    notice("Binding succeeded");
+                    printf("panel: binding succeeded\n");
                     panel->beep(platform::PanelTone::Success); break;
                 case gnd::BIND_FAILED:
-                    notice("Binding failed");
+                    printf("panel: binding failed\n");
                     panel->beep(platform::PanelTone::Failure); break;
-                case gnd::BIND_IDLE: notice("Binding ended"); break;
+                case gnd::BIND_IDLE: printf("panel: binding ended\n"); break;
                 default: break;
                 }
             }
@@ -606,12 +814,22 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             const auto render_start = kestrel_ui::monotonic_us();
             view.update(ui_now);
             model.hud_pid=hud.pid();model.hud_restarts=hud.restarts();
+            const auto presented = display.presentations;
             lv_timer_handler();
-            lv_refr_now(display.lv_display());
+            // LVGL pauses its refresh timer until something is invalidated.
+            // Refreshing anyway is not free with two buffers: it would copy
+            // the whole last frame into the other one, which the next frame
+            // does for less (leaving out what it redraws). Nor when the timer
+            // has just drawn this frame itself (a layout in that refresh
+            // leaves it unpaused): a second one would copy into the buffer
+            // the overlay copier may still be reading.
+            if (display.presentations == presented &&
+                !lv_timer_get_paused(lv_display_get_refr_timer(display.lv_display())))
+                lv_refr_now(display.lv_display());
             const auto overlay_start = kestrel_ui::monotonic_us();
             if (display.presentations != drawn) {
                 drawn = display.presentations;
-                receiver.screen->overlay_damage(display.pixels().data(), screen_w, screen_h, display.take_damage());
+                copier.submit(display.pixels().data(), display.take_damage());
             }
             const auto rendered = kestrel_ui::monotonic_us();
             // Keep an absolute phase: sleep/wakeup overhead must not lower
@@ -619,8 +837,20 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             const uint64_t frame_us = 1000000 / std::max(1, model.fps);
             frame_deadline=kestrel_ui::next_frame_deadline(frame_deadline,rendered,frame_us);
             usleep(frame_deadline-rendered);
+            const auto ended = kestrel_ui::monotonic_us();
+            // The FPS counter: loops (one a refresh while they keep up) and the
+            // slowest one's work, its sleep left out, over the last second.
+            ++rate_loops; rate_slowest_us = std::max(rate_slowest_us, rendered - now);
+            if (ended - rate_start >= 1000000) {
+                if (model.fps_counter) {
+                    char rate[48];
+                    std::snprintf(rate, sizeof(rate), "%.0f FPS  MAX %.1f MS", rate_loops * 1e6 / double(ended - rate_start),
+                                  rate_slowest_us / 1000.0);
+                    model.backend.frame_rate = rate;
+                } else model.backend.frame_rate.clear();
+                rate_start = ended; rate_loops = rate_slowest_us = 0;
+            }
             if (o.profile) {
-                const auto ended = kestrel_ui::monotonic_us();
                 ++profile_loops;
                 render_us += overlay_start - render_start;
                 overlay_us += rendered - overlay_start;
@@ -631,12 +861,17 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                     const double seconds = double(ended - profile_start) / 1000000;
                     const auto presented = receiver.screen->presented();
                     const auto ui_flips=receiver.screen->overlay_presented();
+                    // overlay: the UI thread's handover (a wait for the previous
+                    // copy); copy: the copier's own time, on the other core.
+                    const auto copied_us = copier.copy_us();
                     printf("profile: target=%d loops=%.2f/s UI=%.2f fps UI_scanout=%.2f/s HDMI_updates=%.2f/s "
-                           "render=%.1fms overlay=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
+                           "render=%.1fms overlay=%.1fms copy=%.1fms max_loop=%.1fms max_render=%.1fms max_overlay=%.1fms\n",
                            model.fps, profile_loops / seconds, (drawn - profile_drawn) / seconds,
                            (ui_flips-profile_ui_flips)/seconds, (presented - profile_presented) / seconds,
                            render_us / (1000.0 * profile_loops), overlay_us / (1000.0 * profile_loops),
+                           (copied_us - profile_copy_us) / (1000.0 * profile_loops),
                            longest_loop_us / 1000.0, longest_render_us / 1000.0, longest_overlay_us / 1000.0);
+                    profile_copy_us = copied_us;
                     profile_start = ended; profile_drawn = drawn; profile_presented = presented;profile_ui_flips=ui_flips;
                     profile_loops = render_us = overlay_us = longest_loop_us = 0;
                     longest_render_us = longest_overlay_us = 0;
@@ -647,6 +882,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
             display.dump(o.screenshot);
         const bool source_failed = source_exited.load();
         player.stop();
+        exporter.reset();
         workers.finish();
         printf("ar9311: display presentations=%llu UI presentations=%llu\n",
                (unsigned long long)receiver.screen->presented(), (unsigned long long)display.presentations);

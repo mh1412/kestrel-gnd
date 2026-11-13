@@ -88,19 +88,30 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
     choice("Sharpness",c.sharp,c.camera_n,camera || p1_has("sharpness"),levels(air::kCamSharpMax),p1_reason);
     choice("3D DNR",c.dnr3d,c.dnr_n || c.camera_n,camera || p1_has("3dnr"),table(air::kDnrVals,air::kDnrLabels,air::kDnrCount),p1_reason);
     choice("Focus Mode",c.focus,c.camera_n,camera,{{0,"OFF"},{1,"ON"}},p1_reason);
-    choice("Video Mode",0,true,false,{{0,"1920x1080 @ 60"}},"This native display/decoder currently supports 1080p60 only.");
+    // The air unit's own video modes it can switch to: the universal ones
+    // (720p60/100, 1080p60/100) plus any its features add (864p120/144 on a
+    // Lite+). Screen Mode Auto follows the stream; 1080p100 is captured and
+    // decoded at 100 fps but this HDMI output tops out at 1080p60.
+    // The mode it runs stays in the list whatever its feature bits say (they
+    // arrive after the mode at link-up), so the row names it.
+    std::vector<ReceiverChoice> modes;
+    for (int i = 0; i < int(video_modes_.size()); i++)
+        if (video_modes_[i].need == 0 || (u.features & video_modes_[i].need) || i == c.video_mode)
+            modes.push_back({i, video_modes_[i].name});
+    choice("Video Mode", c.video_mode, c.mode_n && c.video_mode >= 0,
+           u.info.kestrel || u.stock, modes, "Requires a recognized air unit.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
            "Requires an fpvOS air unit.");
     // Share the legacy menu's mode/level mapping and per-air-unit limits.
     const bool automatic=ar_pwr_is_auto(a.tx_power_want_mw);
     int tops[kArPwrTopsMax];
     const int count=ar_pwr_tops(a.prj,a.fine,automatic,tops);
-    std::vector<ReceiverChoice> powers, modes;
+    std::vector<ReceiverChoice> powers, power_modes;
     for(int i=0;i<count;++i) powers.push_back({tops[i],kArPwrLevels[ar_pwr_index(tops[i])].label});
     for(int mode=0;mode<2;++mode)
         if(ar_pwr_pick(a.prj,a.fine,mode,ar_pwr_top(a.tx_power_want_mw))>=0)
-            modes.push_back({mode,mode?"AUTO":"FIXED"});
-    choice("power_mode",automatic,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,modes,
+            power_modes.push_back({mode,mode?"AUTO":"FIXED"});
+    choice("power_mode",automatic,a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,power_modes,
            "The radio does not expose power control.");
     choice("power",ar_pwr_top(a.tx_power_want_mw),a.tx_power_want_mw>0,g.rf_caps & gnd::RF_CAP_POWER,powers,
            "The radio does not expose power control.");
@@ -127,6 +138,10 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
         state.air_info["sn"]=p1 && !u.info.chipid ? "--" : serial;
         state.air_info["sw_version"]=std::to_string(u.info.stock[0])+"."+std::to_string(u.info.stock[1])+"."+std::to_string(u.info.stock[2]);
         for(int i=0;i<u.info.kv_n;++i) state.air_info[u.info.kv[i].key]=u.info.kv[i].value;
+        if(u.info.proto) state.air_info["proto"]=std::to_string(u.info.proto);
+        std::string caps;
+        for(int i=0;i<u.info.caps_n;++i) caps+=std::string(i?", ":"")+u.info.caps[i];
+        if(!caps.empty()) state.air_info["caps"]=caps;
     }
 }
 std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now) {
@@ -137,6 +152,7 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
         throw std::invalid_argument("Unsupported control value");
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
+    else if(id=="Video Mode") camera_.set_mode(value);
     else if(id=="power" || id=="power_mode") {
         const auto a=air_.state();
         const bool mode=id=="power_mode" ? value!=0 : ar_pwr_is_auto(a.tx_power_want_mw);

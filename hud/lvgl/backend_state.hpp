@@ -36,6 +36,10 @@ struct Telemetry {
     bool connected = false;
     int mcs = -1, quality_raw = unavailable, frequency_raw = unavailable, distance_raw = unavailable;
     int voltage_mv = 0, cpu_temperature_x100 = unavailable, rf_temperature_raw = unavailable;
+    // The receiver's own readings (its SoC temperature) are read here, not
+    // carried by the link: fresh on their own stamp, link or not.
+    uint64_t local_stamp_us = 0;
+    bool local_fresh(uint64_t now) const { return local_stamp_us && now >= local_stamp_us && now - local_stamp_us < 5000000; }
     unsigned status_payload_bytes = 0;
     uint64_t status_frames = 0, unknown_frames = 0, bad_frames = 0;
     bool fresh(uint64_t now) const { return stamp_us && now >= stamp_us && now - stamp_us < freshness_us; }
@@ -98,6 +102,9 @@ struct ReceiverControl {
 struct BackendState : ReceiverState {
     struct Recording {std::string name;uint64_t bytes=0;std::shared_ptr<const media::Thumbnail> thumbnail;};
     std::vector<Recording> recordings;
+    bool export_busy=false;
+    int export_percent=0;
+    std::string export_file,export_message;
     bool playback_busy=false,playback_paused=false,playback_seeking=false;
     uint64_t playback_position_us=0,playback_duration_us=0;
     std::string playback_error,playback_telemetry_error;
@@ -111,6 +118,8 @@ struct BackendState : ReceiverState {
     bool bf_available=false;
     float hud_dx=0,hud_dy=0,hud_bank=0;
     std::string radio_debug;
+    // The FPS counter's text, from the main loop once a second (empty: hidden).
+    std::string frame_rate;
     ChannelState channels;
     std::map<std::string, ReceiverControl> controls;
     std::map<std::string, std::string> air_info;
