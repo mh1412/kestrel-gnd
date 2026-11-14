@@ -25,6 +25,8 @@
 #include "msp/msp_osd.hpp"
 #include "motion/imu_reader.hpp"
 #include "hal/source_decoder.hpp"
+#include "hal/artosyn/wave5_strips.hpp"
+#include "hal/v4l2/vdec_v4l2.hpp"
 #include "dvr/stream_player.hpp"
 #include "dvr/export_job.hpp"
 #include "hal/v4l2/find_encoder.hpp"
@@ -218,6 +220,9 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         zones::load(settings);
         o.link.max_kbps=settings.get(radio::setting::ar8030_max_kbps);
         ar8030_load_policy(o.link, settings, bsp::board().radio.default_max_bw_mhz);
+        // Asked of an air unit that has them (the P1's); and its exposure cap.
+        o.link.strips=settings.get(radio::setting::ar8030_strips);
+        o.link.max_exp_us=settings.get(radio::setting::ar8030_max_exp_us);
         o.link.tx_power_mw=o.link.tx_power_want_mw=settings.get(radio::setting::tx_power_mw);
         radio::Model radio_model(settings);
         bus::Waker updates;
@@ -268,6 +273,22 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         DvrSink recording_sink(codec,recorder);
         Ar8030Link link(radio_model, o.link, settings, codec, receiver.decoder, &stop);
         link.add_video_sink(&recording_sink);
+        // Strips (kestrel-air's, the P1's): each decoded by a Wave5 decoder of
+        // its own straight into its rows of the whole picture (fpvOS kernel
+        // patch 0037), the live decoder letting go of the hardware meanwhile.
+        // Not offered (VIDEO > Strips not listed) without the patch.
+        if (hal::Wave5Strips::available(o.platform.decoder_device)) {
+            const std::string device=o.platform.decoder_device;
+            link.set_strips(
+                // Unused: the strips' decoders are the joiner's own.
+                [](std::function<void(std::shared_ptr<DecodedUnit>)>, std::atomic<bool>*) { return std::unique_ptr<Vdec>(); },
+                [preview_sink,source_decoder,device,codec] {
+                    return std::unique_ptr<hal::StripJoiner>(new hal::Wave5Strips(codec, device, preview_sink,
+                        {[source_decoder](bool on) { source_decoder->hold_live(on); },
+                         [source_decoder] { return source_decoder->live_released(); }}));
+                });
+            printf("strips: offered (decoded in place)\n");
+        }
         std::atomic<bool> source_exited{false}, worker_failed{false};
         struct Join {
             std::atomic<bool> &stop;
@@ -477,6 +498,7 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
         uint64_t render_us = 0, overlay_us = 0, longest_loop_us = 0;
         uint64_t longest_render_us = 0, longest_overlay_us = 0;
         uint64_t rate_start = start, rate_loops = 0, rate_slowest_us = 0, profile_copy_us = 0;
+        unsigned screen_source = 0;  // the air unit the screen was last told of
         while (!interrupted && !model.quit && !source_exited && !receiver.screen->failed() &&
                !receiver.decoder->failed()) {
             const auto now = kestrel_ui::monotonic_us();
@@ -530,8 +552,19 @@ display::SessionResult run_session(Options o, Settings& settings, display::ModeT
                 menu_requested = 0;
                 controller.key(kestrel_ui::Key::Menu);
             }
-            model.backend.media.video_stamp_us = receiver.decoder->last_frame_us();
+            // The radio names each paired air unit as it links (before its
+            // pictures): the screen keeps each one's camera rate.
+            if (const unsigned peer = unsigned(settings.get(radio::setting::ar8030_last_peer)); peer != screen_source) {
+                screen_source = peer;
+                char id[16];
+                std::snprintf(id, sizeof id, "%08X", peer);
+                if (peer) receiver.screen->set_source(id);
+            }
             const auto video = receiver.screen->video_stats();
+            // The live decoder's last picture, or the screen's last one put up:
+            // strips are decoded by the joiner's own decoders while the live
+            // one lets go, so only the screen sees those.
+            model.backend.media.video_stamp_us = std::max(receiver.decoder->last_frame_us(), video.stamp_us);
             // Decoded pictures the display drops (another size) are no video
             // on the screen: the idle status shows, not RECEIVING VIDEO.
             if(video.rejected_us && now>=video.rejected_us && now-video.rejected_us<2000000)

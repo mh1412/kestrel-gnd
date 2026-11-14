@@ -102,6 +102,9 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
            u.info.kestrel || u.stock, modes, "Requires a recognized air unit.");
     choice("Max Bitrate",e.max_kbps,true,u.info.kestrel,table(air::kArMaxBrVals,air::kArMaxBrLabels,air::kArMaxBrCount),
            "Requires an fpvOS air unit.");
+    // Strips: only where both ends can (the feature bit), not listed otherwise.
+    if(linked && (u.features & air::kFeatStrips))
+        choice("Strips",e.strips,true,true,table(air::kArStripsVals,air::kArStripsLabels,air::kArStripsCount));
     // Share the legacy menu's mode/level mapping and per-air-unit limits.
     const bool automatic=ar_pwr_is_auto(a.tx_power_want_mw);
     int tops[kArPwrTopsMax];
@@ -117,6 +120,7 @@ void ReceiverControls::update(BackendState& state, uint64_t now) {
            "The radio does not expose power control.");
     choice("max_bw",g.max_bw_mhz,true,g.radio_fw==1,
            {{0,"AUTO"},{5,"5 MHz"},{10,"10 MHz"},{20,"20 MHz"},{40,"40 MHz"}},"Requires Open8030.");
+
     choice("standby",u.standby,u.standby_n,true,{{0,"OFF"},{1,"ON"}});
     std::vector<ReceiverChoice> mcs{{-1,"AUTO"}};
     for(int i=0;i<12;++i) mcs.push_back({i,"MCS "+std::to_string(i)});
@@ -152,6 +156,7 @@ std::string ReceiverControls::apply(const std::string& id,int value,uint64_t now
         throw std::invalid_argument("Unsupported control value");
     if(id=="bind") {ground_.bind();return "Binding requested";}
     if(id=="Max Bitrate") encoder_.set_max_bitrate(value);
+    else if(id=="Strips") encoder_.set_strips(value);
     else if(id=="Video Mode") camera_.set_mode(value);
     else if(id=="power" || id=="power_mode") {
         const auto a=air_.state();
